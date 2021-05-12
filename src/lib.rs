@@ -1,0 +1,188 @@
+use byte_strings::concat_bytes;
+use enum_primitive::*;
+use num::FromPrimitive;
+use std::convert::TryInto;
+use std::error::Error;
+use std::ffi::CStr;
+use std::fmt;
+use std::fmt::Display;
+use std::os::raw::{c_char, c_int};
+use std::slice;
+
+mod bindings;
+
+#[repr(C)]
+pub struct StaticCStr(*const u8);
+unsafe impl Sync for StaticCStr {}
+
+#[macro_export]
+macro_rules! SPANK_PLUGIN {
+    ($spank_name:literal, $spank_version:literal, $spank_ty:ty) => {
+        #[no_mangle]
+        pub static plugin_name: StaticCStr =
+            StaticCStr({ concat_bytes!($spank_name, b"\0") } as *const u8);
+        #[no_mangle]
+        pub static plugin_type: StaticCStr = StaticCStr(b"spank" as *const u8);
+        #[no_mangle]
+        pub static plugin_version: c_int = $spank_version;
+
+        fn _check_spank_trait<T: Plugin>() {}
+        fn _t() {
+            _check_spank_trait::<$spank_ty>()
+        }
+
+        macro_rules! spank_callback {
+            ($c_spank_cb:ident, $rust_spank_cb:ident) => {
+                #[no_mangle]
+                #[doc(hidden)]
+                pub extern "C" fn $c_spank_cb(
+                    spank: bindings::spank_t,
+                    ac: c_int,
+                    argv: *const *const c_char,
+                ) -> c_int {
+                    // Check if we can use a better return type for errors
+
+                    let args = unsafe {
+                        let count = match ac.try_into() {
+                            Ok(count) => count,
+                            Err(_) => return 1,
+                        };
+
+                        let v = slice::from_raw_parts(argv, count)
+                            .iter()
+                            .map(|arg| CStr::from_ptr(*arg).to_str())
+                            .collect::<Result<Vec<_>, _>>();
+                        match v {
+                            Ok(v) => v,
+                            Err(_) => return 1,
+                        }
+                    };
+
+                    if let Err(err) = <$spank_ty>::$rust_spank_cb(spank, args) {
+                        -(err as i32)
+                    } else {
+                        bindings::spank_err_ESPANK_SUCCESS as i32
+                    }
+                }
+            };
+        }
+
+        spank_callback!(slurm_spank_init, init);
+        spank_callback!(slurm_spank_slurmd_init, slurmd_init);
+        spank_callback!(slurm_spank_job_prolog, job_prolog);
+        spank_callback!(slurm_spank_init_post_opt, init_post_opt);
+        spank_callback!(slurm_spank_local_user_init, local_user_init);
+        spank_callback!(slurm_spank_user_init, user_init);
+        spank_callback!(slurm_spank_task_init_privileged, task_init_privileged);
+        spank_callback!(slurm_spank_task_init, task_init);
+        spank_callback!(slurm_spank_task_post_fork, task_post_fork);
+        spank_callback!(slurm_spank_task_exit, task_exit);
+        spank_callback!(slurm_spank_job_epilog, job_epilog);
+        spank_callback!(slurm_spank_slurmd_exit, slurmd_exit);
+        spank_callback!(slurm_spank_exit, exit);
+    };
+}
+
+pub trait Plugin {
+    fn init(_: bindings::spank_t, _: Vec<&str>) -> Result<(), SpankError> {
+        Ok(())
+    }
+    fn slurmd_init(_: bindings::spank_t, _: Vec<&str>) -> Result<(), SpankError> {
+        Ok(())
+    }
+    fn job_prolog(_: bindings::spank_t, _: Vec<&str>) -> Result<(), SpankError> {
+        Ok(())
+    }
+    fn init_post_opt(_: bindings::spank_t, _: Vec<&str>) -> Result<(), SpankError> {
+        Ok(())
+    }
+    fn local_user_init(_: bindings::spank_t, _: Vec<&str>) -> Result<(), SpankError> {
+        Ok(())
+    }
+    fn user_init(_: bindings::spank_t, _: Vec<&str>) -> Result<(), SpankError> {
+        Ok(())
+    }
+    fn task_init_privileged(_: bindings::spank_t, _: Vec<&str>) -> Result<(), SpankError> {
+        Ok(())
+    }
+    fn task_init(_: bindings::spank_t, _: Vec<&str>) -> Result<(), SpankError> {
+        Ok(())
+    }
+    fn task_post_fork(_: bindings::spank_t, _: Vec<&str>) -> Result<(), SpankError> {
+        Ok(())
+    }
+    fn task_exit(_: bindings::spank_t, _: Vec<&str>) -> Result<(), SpankError> {
+        Ok(())
+    }
+    fn job_epilog(_: bindings::spank_t, _: Vec<&str>) -> Result<(), SpankError> {
+        Ok(())
+    }
+    fn slurmd_exit(_: bindings::spank_t, _: Vec<&str>) -> Result<(), SpankError> {
+        Ok(())
+    }
+    fn exit(_: bindings::spank_t, _: Vec<&str>) -> Result<(), SpankError> {
+        Ok(())
+    }
+}
+impl Error for SpankError {}
+
+impl Display for SpankError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let err = unsafe { CStr::from_ptr(bindings::spank_strerror(*self as u32)).to_str() };
+        if let Ok(err) = err {
+            write!(f, "{}", err)
+        } else {
+            write!(f, "Invalid Error")
+        }
+    }
+}
+
+enum_from_primitive! {
+    #[derive(Debug, Copy, Clone, PartialEq)]
+    #[repr(u32)] // XXX: FIXME: force the type generated by bindgen
+    pub enum SpankError {
+        Generic = bindings::spank_err_ESPANK_ERROR,
+        BadArg = bindings::spank_err_ESPANK_BAD_ARG,
+        NotTask = bindings::spank_err_ESPANK_NOT_TASK,
+        EnvExists = bindings::spank_err_ESPANK_ENV_EXISTS,
+        EnvNotExist = bindings::spank_err_ESPANK_ENV_NOEXIST,
+        NoSpace = bindings::spank_err_ESPANK_NOSPACE,
+        NotRemote = bindings::spank_err_ESPANK_NOT_REMOTE,
+        NoExist = bindings::spank_err_ESPANK_NOEXIST,
+        NotExecd = bindings::spank_err_ESPANK_NOT_EXECD,
+        NotAvail = bindings::spank_err_ESPANK_NOT_AVAIL,
+        NotLocal = bindings::spank_err_ESPANK_NOT_LOCAL,
+    }
+}
+
+enum_from_primitive! {
+    #[derive(Debug, Copy, Clone, PartialEq)]
+    #[repr(u32)] // XXX: FIXME: force the type generated by bindgen
+    pub enum Context {
+        // We dont represent error here, as errors are better embedded in Results
+        Local  = bindings::spank_context_S_CTX_LOCAL,
+        Remote = bindings::spank_context_S_CTX_REMOTE,
+        Allocator = bindings::spank_context_S_CTX_ALLOCATOR,
+        Slurmd = bindings::spank_context_S_CTX_SLURMD,
+        JobScript = bindings::spank_context_S_CTX_JOB_SCRIPT,
+    }
+}
+
+pub fn context() -> Result<Context, SpankError> {
+    let ctx = unsafe { bindings::spank_context() };
+    Context::from_u32(ctx).ok_or(SpankError::Generic)
+}
+
+// Example below
+struct TestSpank;
+
+impl Plugin for TestSpank {
+    fn init(_: bindings::spank_t, args: Vec<&str>) -> Result<(), SpankError> {
+        println!("C'est l'initialisation et les arguments sont: {:?}", args);
+        println!("Context is {:?}", context()?);
+
+        Ok(())
+    }
+}
+
+SPANK_PLUGIN!(b"toto", 1, TestSpank);
