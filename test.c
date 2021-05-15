@@ -1,21 +1,37 @@
 #include <stdio.h>
 #include <slurm/spank.h>
+#include <string.h>
+#include <stdarg.h>
 
-struct spank_handle {
-
+struct spank_handle
+{
 };
 
-extern char * plugin_name;
-extern char * plugin_type;
+extern char *plugin_name;
+extern char *plugin_type;
 extern int slurm_spank_init(spank_t sp, int ac, char **av);
 
-spank_context_t spank_context (void) {
-  return 35;
-}
+struct spank_option saved_opt;
 
-const char * spank_strerror (spank_err_t err)
+spank_context_t spank_context(void)
 {
-        switch (err) {
+        return S_CTX_LOCAL;
+}
+spank_err_t spank_option_register(spank_t sp,
+                                  struct spank_option *opt)
+{
+        saved_opt.cb = opt->cb;
+        saved_opt.val = opt->val;
+        saved_opt.has_arg = opt->has_arg;
+        if (saved_opt.has_arg && saved_opt.arginfo)
+        {
+                saved_opt.arginfo = strdup(opt->arginfo);
+        }
+}
+const char *spank_strerror(spank_err_t err)
+{
+        switch (err)
+        {
         case ESPANK_SUCCESS:
                 return "Success";
         case ESPANK_ERROR:
@@ -45,12 +61,27 @@ const char * spank_strerror (spank_err_t err)
         return "Unknown";
 }
 
-int main(int argc, char** argv) {
-  int err;
-  printf("plugin_name: %s\nplugin_type: %s\n", plugin_name, plugin_type);
-  err = slurm_spank_init (NULL, argc, argv);
-  if (err != 0 ) {
-    printf("slurm_spank_init returned %d", err);
-  }
+int main(int argc, char **argv)
+{
+        int err;
+        printf("plugin_name: %s\nplugin_type: %s\n", plugin_name, plugin_type);
+        err = slurm_spank_init(NULL, argc, argv);
+        printf("slurm_spank_init returned %d \n", err);
 
+        saved_opt.cb(saved_opt.val, "toto", 0);
+
+        err = slurm_spank_exit(NULL, argc, argv);
+        printf("slurm_spank_exit returned %d \n", err);
+}
+
+void slurm_error(const char *fmt, ...)
+{
+        va_list args;
+        va_start(args, fmt);
+
+        fprintf(stderr, "toto\n");
+        fprintf(stderr, "fmt: %s\n", fmt);
+        vfprintf(stderr, fmt, args);
+
+        va_end(args);
 }
