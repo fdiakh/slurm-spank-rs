@@ -1,23 +1,23 @@
+//! Rust interface for writing Slurm SPANK Plugins
+
 use byte_strings::{c_str, concat_bytes};
 use lazy_static::lazy_static;
-use num_enum::{IntoPrimitive, TryFromPrimitive};
-//use num::FromPrimitive;
 use libc::{gid_t, pid_t, uid_t};
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 use std::collections::HashMap;
-use std::convert::TryFrom;
-use std::convert::TryInto;
+use std::convert::{TryFrom, TryInto};
 use std::error::Error;
 use std::ffi::{CStr, CString};
 use std::fmt;
-use std::fmt::Display;
 use std::os::raw::{c_char, c_int};
-use std::ptr;
-use std::slice;
+use std::panic::catch_unwind;
 use std::sync::Mutex;
+use std::{ptr, slice};
 
 mod bindings;
 
 #[repr(C)]
+#[doc(hidden)]
 pub struct StaticCStr(*const u8);
 unsafe impl Sync for StaticCStr {}
 
@@ -123,26 +123,12 @@ impl<'a> SpankHandle<'a> {
         }
     }
 
-    pub fn argv(&self) -> Result<Vec<&str>, SpankError> {
+    pub fn plugin_argv(&self) -> Result<Vec<&str>, SpankError> {
         self.argv_to_vec(self.argc as usize, self.argv)
     }
 
-    pub fn job_argv(&self) -> Result<Vec<&str>, SpankError> {
-        let mut argc: c_int = 0;
-        let mut argv: *const *const c_char = ptr::null_mut();
-
-        let argc_ptr: *mut c_int = &mut argc;
-        let argv_ptr: *mut *const *const c_char = &mut argv;
-
-        match unsafe {
-            bindings::spank_get_item(self.spank, SpankItem::JobArgv.into(), argc_ptr, argv_ptr)
-        } {
-            bindings::spank_err_ESPANK_SUCCESS => self.argv_to_vec(argc as usize, argv),
-            e => Err(SpankError::try_from(e).unwrap_or(SpankError::Generic)),
-        }
-    }
-
-    // TODO: Return a better error type and maybe validate argc earlier
+    // TODO: Return a better error type
+    // TODO: Make an OsStr version
     fn argv_to_vec(
         &self,
         argc: usize,
@@ -155,51 +141,63 @@ impl<'a> SpankHandle<'a> {
             .map_err(|_| SpankError::Generic)
     }
 
-    pub fn job_supplmentary_gids(&self) -> Result<Vec<gid_t>, SpankError> {
-        let mut gidc: c_int = 0;
-        let mut gidv: *const gid_t = ptr::null_mut();
+    fn do_getenv(
+        &self,
+        name: &str,
+        spank_fn: unsafe extern "C" fn(
+            bindings::spank_t,
+            *const c_char,
+            *mut c_char,
+            c_int,
+        ) -> bindings::spank_err_t,
+    ) -> Result<String, SpankError> {
+        let mut max_size = 4096;
+        let c_name = CString::new(name).map_err(|_| SpankError::BadArg)?;
+        let mut buffer = Vec::<c_char>::with_capacity(max_size);
+        loop {
+            buffer.resize(max_size, 0);
+            let buffer_ptr = buffer.as_mut_ptr();
 
-        let gidc_ptr: *mut c_int = &mut gidc;
-        let gidv_ptr: *mut *const gid_t = &mut gidv;
-
-        match unsafe {
-            bindings::spank_get_item(self.spank, SpankItem::JobEnv.into(), gidv_ptr, gidc_ptr)
-        } {
-            bindings::spank_err_ESPANK_SUCCESS => {
-                Ok(unsafe { slice::from_raw_parts(gidv, gidc as usize) }
-                    .iter()
-                    .map(|&gid| gid)
-                    .collect::<Vec<gid_t>>())
+            match unsafe { spank_fn(self.spank, c_name.as_ptr(), buffer_ptr, max_size as i32) } {
+                bindings::spank_err_ESPANK_NOSPACE => {
+                    max_size *= 2;
+                    continue;
+                }
+                bindings::spank_err_ESPANK_SUCCESS => {
+                    return Ok(unsafe { CStr::from_ptr(buffer_ptr) }
+                        .to_string_lossy()
+                        .into_owned())
+                }
+                e => return Err(SpankError::try_from(e).unwrap_or(SpankError::Generic)),
             }
-            e => Err(SpankError::try_from(e).unwrap_or(SpankError::Generic)),
         }
     }
 
-    pub fn job_env(&self) -> Result<Vec<&str>, SpankError> {
-        let mut argv: *const *const c_char = ptr::null_mut();
-        let argv_ptr: *mut *const *const c_char = &mut argv;
-
-        match unsafe { bindings::spank_get_item(self.spank, SpankItem::JobEnv.into(), argv_ptr) } {
-            bindings::spank_err_ESPANK_SUCCESS => {
-                if argv.is_null() {
-                    return Err(SpankError::Generic);
-                }
-                let mut argc: isize = 0;
-                while !unsafe { *argv.offset(argc as isize) }.is_null() {
-                    argc += 1;
-                }
-                self.argv_to_vec(argc as usize, argv)
-            }
-            e => Err(SpankError::try_from(e).unwrap_or(SpankError::Generic)),
-        }
+    pub fn getenv(&self, name: &str) -> Result<String, SpankError> {
+        self.do_getenv(name, bindings::spank_getenv)
     }
 
-    pub fn setenv(&self, name: &str, value: &str, overwrite: bool) -> Result<(), SpankError> {
+    pub fn job_control_getenv(&self, name: &str) -> Result<String, SpankError> {
+        self.do_getenv(name, bindings::spank_job_control_getenv)
+    }
+
+    pub fn do_setenv(
+        &self,
+        name: &str,
+        value: &str,
+        overwrite: bool,
+        spank_fn: unsafe extern "C" fn(
+            bindings::spank_t,
+            *const c_char,
+            *const c_char,
+            c_int,
+        ) -> bindings::spank_err_t,
+    ) -> Result<(), SpankError> {
         let c_name = CString::new(name).map_err(|_| SpankError::BadArg)?;
         let c_value = CString::new(value).map_err(|_| SpankError::BadArg)?;
 
         match unsafe {
-            bindings::spank_setenv(
+            spank_fn(
                 self.spank,
                 c_name.as_ptr(),
                 c_value.as_ptr(),
@@ -211,12 +209,38 @@ impl<'a> SpankHandle<'a> {
         }
     }
 
-    pub fn unsetenv(&self, name: &str) -> Result<(), SpankError> {
+    pub fn job_control_setenv(
+        &self,
+        name: &str,
+        value: &str,
+        overwrite: bool,
+    ) -> Result<(), SpankError> {
+        self.do_setenv(name, value, overwrite, bindings::spank_setenv)
+    }
+
+    pub fn setenv(&self, name: &str, value: &str, overwrite: bool) -> Result<(), SpankError> {
+        self.do_setenv(name, value, overwrite, bindings::spank_setenv)
+    }
+
+    fn do_unsetenv(
+        &self,
+        name: &str,
+        spank_fn: unsafe extern "C" fn(bindings::spank_t, *const c_char) -> bindings::spank_err_t,
+    ) -> Result<(), SpankError> {
         let c_name = CString::new(name).map_err(|_| SpankError::BadArg)?;
-        match unsafe { bindings::spank_unsetenv(self.spank, c_name.as_ptr()) } {
+
+        match unsafe { spank_fn(self.spank, c_name.as_ptr()) } {
             bindings::spank_err_ESPANK_SUCCESS => Ok(()),
             e => Err(SpankError::try_from(e).unwrap_or(SpankError::Generic)),
         }
+    }
+
+    pub fn unsetenv(&self, name: &str) -> Result<(), SpankError> {
+        self.do_unsetenv(name, bindings::spank_unsetenv)
+    }
+
+    pub fn job_control_unsetenv(&self, name: &str) -> Result<(), SpankError> {
+        self.do_unsetenv(name, bindings::spank_job_control_unsetenv)
     }
 
     pub fn get_option_value(&self, name: &str) -> Option<&str> {
@@ -260,6 +284,41 @@ impl<'a> SpankHandle<'a> {
     spank_item_getter!(job_local_task_count, SpankItem::JobLocalTaskCount, u32);
     spank_item_getter!(job_total_task_count, SpankItem::JobTotalTaskCount, u32);
     spank_item_getter!(job_ncpus, SpankItem::JobNcpus, u16);
+
+    pub fn job_argv(&self) -> Result<Vec<&str>, SpankError> {
+        let mut argc: c_int = 0;
+        let mut argv: *const *const c_char = ptr::null_mut();
+
+        let argc_ptr: *mut c_int = &mut argc;
+        let argv_ptr: *mut *const *const c_char = &mut argv;
+
+        match unsafe {
+            bindings::spank_get_item(self.spank, SpankItem::JobArgv.into(), argc_ptr, argv_ptr)
+        } {
+            bindings::spank_err_ESPANK_SUCCESS => self.argv_to_vec(argc as usize, argv),
+            e => Err(SpankError::try_from(e).unwrap_or(SpankError::Generic)),
+        }
+    }
+
+    pub fn job_env(&self) -> Result<Vec<&str>, SpankError> {
+        let mut argv: *const *const c_char = ptr::null_mut();
+        let argv_ptr: *mut *const *const c_char = &mut argv;
+
+        match unsafe { bindings::spank_get_item(self.spank, SpankItem::JobEnv.into(), argv_ptr) } {
+            bindings::spank_err_ESPANK_SUCCESS => {
+                if argv.is_null() {
+                    return Err(SpankError::Generic);
+                }
+                let mut argc: isize = 0;
+                while !unsafe { *argv.offset(argc as isize) }.is_null() {
+                    argc += 1;
+                }
+                self.argv_to_vec(argc as usize, argv)
+            }
+            e => Err(SpankError::try_from(e).unwrap_or(SpankError::Generic)),
+        }
+    }
+
     spank_item_getter!(task_id, SpankItem::TaskId, c_int);
     spank_item_getter!(task_global_id, SpankItem::TaskGlobalId, u32);
     spank_item_getter!(task_exit_status, SpankItem::TaskExitStatus, c_int);
@@ -286,20 +345,51 @@ impl<'a> SpankHandle<'a> {
         u32,
         u32
     );
-    spank_item_getter!(job_alloc_mem, SpankItem::JobAllocMem, u64);
-    spank_item_getter!(slurm_restart_count, SpankItem::SlurmRestartCount, u32);
-    spank_item_getter!(job_array_id, SpankItem::JobArrayId, u32);
-    spank_item_getter!(job_array_task_id, SpankItem::JobArrayTaskId, u32);
+
+    pub fn job_supplmentary_gids(&self) -> Result<Vec<gid_t>, SpankError> {
+        let mut gidc: c_int = 0;
+        let mut gidv: *const gid_t = ptr::null_mut();
+
+        let gidc_ptr: *mut c_int = &mut gidc;
+        let gidv_ptr: *mut *const gid_t = &mut gidv;
+
+        match unsafe {
+            bindings::spank_get_item(
+                self.spank,
+                SpankItem::JobSupplementaryGids.into(),
+                gidv_ptr,
+                gidc_ptr,
+            )
+        } {
+            bindings::spank_err_ESPANK_SUCCESS => {
+                Ok(unsafe { slice::from_raw_parts(gidv, gidc as usize) }
+                    .iter()
+                    .map(|&gid| gid)
+                    .collect::<Vec<gid_t>>())
+            }
+            e => Err(SpankError::try_from(e).unwrap_or(SpankError::Generic)),
+        }
+    }
+
     spank_item_getter!(slurm_version, SpankItem::SlurmVersion, &str);
     spank_item_getter!(slurm_version_major, SpankItem::SlurmVersionMajor, &str);
     spank_item_getter!(slurm_version_minor, SpankItem::SlurmVersionMinor, &str);
     spank_item_getter!(slurm_version_micro, SpankItem::SlurmVersionMicro, &str);
+    spank_item_getter!(step_cpus_per_task, SpankItem::StepCpusPerTask, u64);
+    spank_item_getter!(job_alloc_cores, SpankItem::JobAllocCores, u64);
+    spank_item_getter!(job_alloc_mem, SpankItem::JobAllocMem, u64);
+    spank_item_getter!(step_alloc_cores, SpankItem::StepAllocCores, u64);
+    spank_item_getter!(step_alloc_mem, SpankItem::StepAllocMem, u64);
+    spank_item_getter!(slurm_restart_count, SpankItem::SlurmRestartCount, u32);
+    spank_item_getter!(job_array_id, SpankItem::JobArrayId, u32);
+    spank_item_getter!(job_array_task_id, SpankItem::JobArrayTaskId, u32);
 }
 
 fn cstring_escape_null(msg: &str) -> CString {
-    // XXX: We can't deal with NULL characters here, but how do we expect a
-    // plugin author to handle the error if we returned one ? We assume they
-    // would prefer that we render them as a 0 in the logs instead.
+    // XXX: We can't deal with NULL characters when passing strings to slurm log
+    // functions, but how do we expect a plugin author to handle the error if we
+    // returned one ? We assume they would prefer that we render them as a 0 in
+    // the logs instead.
     let c_safe_msg = msg.split('\0').collect::<Vec<&str>>().join("0");
 
     // Should never panic as we made sure there is no NULL chars
@@ -338,25 +428,38 @@ pub fn spank_log(level: LogLevel, msg: &str) {
 pub extern "C" fn spank_opt_callback(val: c_int, optarg: *const c_char, _remote: c_int) -> c_int {
     let mut opt_cache = match OPTIONS.lock() {
         Ok(opt_cache) => opt_cache,
-        // TODO: Log err
-        Err(_) => return bindings::spank_err_ESPANK_ERROR as c_int,
+
+        Err(e) => {
+            spank_log(
+                LogLevel::Error,
+                &format!("Internal spank plugin error: {}", e),
+            );
+            return bindings::spank_err_ESPANK_ERROR as c_int;
+        }
     };
 
     let name = match opt_cache.options.get(val as usize) {
         Some(name) => name.clone(),
-        // TODO: Log err
-        _ => return bindings::spank_err_ESPANK_ERROR as c_int,
+        None => {
+            spank_log(
+                LogLevel::Error,
+                &format!(
+                    "Internal spank plugin error: received unexpected option callback {}",
+                    val
+                ),
+            );
+            return bindings::spank_err_ESPANK_ERROR as c_int;
+        }
     };
 
     let optarg = if optarg == ptr::null() {
         None
     } else {
-        let cstr = unsafe { CStr::from_ptr(optarg) };
-        match cstr.to_str() {
-            Ok(cstr) => Some(cstr.to_string()),
-            // TODO: Log verb
-            _ => return bindings::spank_err_ESPANK_ERROR as c_int,
-        }
+        Some(
+            unsafe { CStr::from_ptr(optarg) }
+                .to_string_lossy()
+                .into_owned(),
+        )
     };
 
     opt_cache.values.entry(name).or_insert(vec![]).push(optarg);
@@ -402,24 +505,44 @@ macro_rules! SPANK_PLUGIN {
                     ac: c_int,
                     argv: *const *const c_char,
                 ) -> c_int {
-                    let mut plugin = match PLUGIN.lock() {
-                        Ok(plugin) => plugin,
-                        Err(_) => return bindings::spank_err_ESPANK_ERROR as c_int,
-                    };
+                    let res = catch_unwind(|| {
+                        //TODO: factor this op
+                        let mut plugin = match PLUGIN.lock() {
+                            Ok(plugin) => plugin,
+                            Err(e) => {
+                                spank_log(
+                                    LogLevel::Error,
+                                    &format!("Internal spank plugin error: {}", e),
+                                );
+                                return bindings::spank_err_ESPANK_ERROR as c_int;
+                            }
+                        };
 
-                    let mut opt_cache = match OPTIONS.lock() {
-                        Ok(cache) => cache,
-                        Err(_) => return bindings::spank_err_ESPANK_ERROR as c_int,
-                    };
+                        let mut opt_cache = match OPTIONS.lock() {
+                            Ok(cache) => cache,
+                            Err(e) => {
+                                spank_log(
+                                    LogLevel::Error,
+                                    &format!("Internal spank plugin error: {}", e),
+                                );
+                                return bindings::spank_err_ESPANK_ERROR as c_int;
+                            }
+                        };
 
-                    match plugin.$rust_spank_cb(&mut SpankHandle {
-                        spank: spank,
-                        opt_cache: &mut opt_cache,
-                        argc: ac,
-                        argv: argv,
-                    }) {
-                        Ok(()) => bindings::spank_err_ESPANK_SUCCESS as c_int,
-                        Err(err) => -(err as c_int),
+                        match plugin.$rust_spank_cb(&mut SpankHandle {
+                            spank: spank,
+                            opt_cache: &mut opt_cache,
+                            argc: ac,
+                            argv: argv,
+                        }) {
+                            Ok(()) => bindings::spank_err_ESPANK_SUCCESS as c_int,
+                            Err(err) => -(err as c_int),
+                        }
+                    });
+
+                    match res {
+                        Ok(e) => e,
+                        Err(_) => bindings::spank_err_ESPANK_ERROR as c_int,
                     }
                 }
             };
@@ -481,7 +604,7 @@ pub trait Plugin {
 }
 impl Error for SpankError {}
 
-impl Display for SpankError {
+impl fmt::Display for SpankError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let cerr = unsafe { CStr::from_ptr(bindings::spank_strerror(*self as u32)) };
 
@@ -495,7 +618,7 @@ impl Display for SpankError {
 
 #[derive(Debug, Copy, Clone, PartialEq, IntoPrimitive)]
 #[repr(u32)] // FIXME: force the type generated by bindgen
-pub enum SpankItem {
+enum SpankItem {
     JobGid = bindings::spank_item_S_JOB_GID,
     JobUid = bindings::spank_item_S_JOB_UID,
     JobId = bindings::spank_item_S_JOB_ID,
@@ -591,7 +714,7 @@ impl Plugin for TestSpank {
     fn init(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
         println!(
             "C'est l'initialisation et les arguments sont: {:?}",
-            spank.argv()
+            spank.plugin_argv()
         );
         println!("Context is {:?}", spank.context()?);
         self.data = 20;
@@ -600,9 +723,24 @@ impl Plugin for TestSpank {
         //     SpankOption::new("opt_a"),
         //     SpankOption::new("opt_b").has_arg("val"),
         // ])
+        println!("{:?}", spank.job_env());
         Ok(())
     }
-
+    fn task_init(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
+        spank_log(
+            LogLevel::Error,
+            &format!("{:?}", spank.job_supplmentary_gids()?),
+        );
+        Ok(())
+    }
+    fn task_exit(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
+        spank_log(
+            LogLevel::Error,
+            &format!("Job env task exit {:?}", spank.job_env()?),
+        );
+        spank_log(LogLevel::Error, "MySpank: task exited");
+        Ok(())
+    }
     fn exit(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
         println!("Data is {:?}", self.data);
         println!("CB returned {:?}", spank.get_option_value("opt_a"));
