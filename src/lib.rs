@@ -388,7 +388,7 @@ impl<'a> SpankHandle<'a> {
         }
 
         if let Some(values) = self.opt_cache.values.get(name) {
-            if let Some(Some(ref value)) = values.get(0) {
+            if let Some(Some(ref value)) = values.last() {
                 return Some(Cow::from(value));
             } else {
                 return None;
