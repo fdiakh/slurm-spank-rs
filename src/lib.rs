@@ -3,7 +3,7 @@
 use byte_strings::{c_str, concat_bytes};
 use lazy_static::lazy_static;
 use libc::{gid_t, pid_t, uid_t};
-use num_enum::{IntoPrimitive, TryFromPrimitive};
+use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -20,8 +20,8 @@ use std::{ptr, slice};
 
 mod bindings;
 
-/// This struct represents a handle to the Slurm interface exposed to SPANK plugins. It provides methods
-/// to query Slurm from your plugin.
+/// This struct represents a handle to the Slurm interface exposed to SPANK
+/// plugins. It provides methods to query Slurm from a plugin.
 pub struct SpankHandle<'a> {
     spank: bindings::spank_t,
     opt_cache: &'a mut OptionCache,
@@ -31,7 +31,8 @@ pub struct SpankHandle<'a> {
 }
 
 macro_rules! spank_item_getter {
-    ($name:ident, $spank_item:path, $arg_name:ident, $arg_type:ty, $result_type:ty) => {
+    ($(#[$outer:meta])* $name:ident, $spank_item:path, $arg_name:ident, $arg_type:ty, $result_type:ty) => {
+        $(#[$outer])*
         pub fn $name(&self, $arg_name: $arg_type) -> Result<$result_type, SpankError> {
             let mut res: $result_type = <$result_type>::default();
             let res_ptr: *mut $result_type = &mut res;
@@ -39,35 +40,38 @@ macro_rules! spank_item_getter {
                 bindings::spank_get_item(self.spank, $spank_item.into(), $arg_name, res_ptr)
             } {
                 bindings::spank_err_ESPANK_SUCCESS => Ok(res),
-                e => Err(SpankError::try_from(e).unwrap_or(SpankError::Generic)),
+                bindings::spank_err_ESPANK_NOEXIST => Err(SpankError::from_noexist($arg_name)),
+                e => Err(SpankError::from_spank("spank_get_item", e)),
             }
         }
     };
-    ($name:ident, $spank_item:path, &str) => {
+    ($(#[$outer:meta])* $name:ident, $spank_item:path, &str) => {
+        $(#[$outer])*
         pub fn $name(&self) -> Result<&str, SpankError> {
             let mut res: *const c_char = ptr::null_mut();
             let res_ptr: *mut *const c_char = &mut res;
             match unsafe { bindings::spank_get_item(self.spank, $spank_item.into(), res_ptr) } {
                 bindings::spank_err_ESPANK_SUCCESS => {
                     if res.is_null() {
-                        Err(SpankError::Generic)
+                        panic!("Received unexpected null pointer from spank_get_item")
                     } else {
-                        unsafe { CStr::from_ptr(res) }
-                            .to_str()
-                            .map_err(|_| SpankError::Generic)
+                        let cstr = unsafe { CStr::from_ptr(res) };
+                        cstr.to_str()
+                            .map_err(|_| SpankError::Utf8Error(cstr.to_string_lossy().to_string()))
                     }
                 }
-                e => Err(SpankError::try_from(e).unwrap_or(SpankError::Generic)),
+                e => Err(SpankError::from_spank("spank_get_item", e)),
             }
         }
     };
-    ($name:ident, $spank_item:path,$result_type:ty) => {
+    ($(#[$outer:meta])* $name:ident, $spank_item:path,$result_type:ty) => {
+        $(#[$outer])*
         pub fn $name(&self) -> Result<$result_type, SpankError> {
             let mut res: $result_type = <$result_type>::default();
             let res_ptr: *mut $result_type = &mut res;
             match unsafe { bindings::spank_get_item(self.spank, $spank_item.into(), res_ptr) } {
                 bindings::spank_err_ESPANK_SUCCESS => Ok(res),
-                e => Err(SpankError::try_from(e).unwrap_or(SpankError::Generic)),
+                e => Err(SpankError::from_spank("spank_get_item", e)),
             }
         }
     };
@@ -84,18 +88,22 @@ fn os_value_to_lossy(value: Cow<'_, OsStr>) -> Cow<'_, str> {
 }
 fn os_value_to_str(value: Cow<'_, OsStr>) -> Result<Cow<'_, str>, SpankError> {
     match value {
-        Cow::Borrowed(value) => Ok(Cow::from(value.to_str().ok_or(SpankError::Generic)?)),
-        Cow::Owned(value) => Ok(Cow::from(
-            value.into_string().map_err(|_| SpankError::Generic)?,
+        Cow::Borrowed(value) => Ok(Cow::from(
+            value.to_str().ok_or(SpankError::from_os_str(value))?,
         )),
+        Cow::Owned(value) => {
+            Ok(Cow::from(value.into_string().map_err(|value_err| {
+                SpankError::from_os_str(&value_err)
+            })?))
+        }
     }
 }
 
-// XXX: Unfortunately, according to the documentation, there are some
-// contexts where you can only use callbacks (init_post_opt) and others
-// where you can only use getopt (prolog/epilog). This is an
-// attempt at providing a uniform interface by caching callbacks or calls
-// to getopt which feels quite hackish. We should try to find a cleaner interface.
+// XXX: Unfortunately, according to the documentation, there are some contexts
+// where you can only use callbacks (init_post_opt) and others where you can
+// only use getopt (prolog/epilog). This is an attempt at providing a uniform
+// interface by caching callbacks or calls to getopt which feels quite hackish.
+// We should try to find a cleaner interface.
 #[derive(Default)]
 struct OptionCache {
     options: Vec<String>,
@@ -106,22 +114,25 @@ impl<'a> SpankHandle<'a> {
     /// Returns the context in which the calling plugin is loaded.
     pub fn context(&self) -> Result<Context, SpankError> {
         let ctx = unsafe { bindings::spank_context() };
-        Context::try_from(ctx).map_err(|_| SpankError::Generic)
+        Context::try_from(ctx)
+            .map_err(|_| SpankError::from_spank("spank_context", bindings::spank_err_ESPANK_ERROR))
     }
 
-    /// Registers a plugin-provided option dynamically. This function
-    /// is only valid when called from your plugin's `init()`, and must
-    /// be guaranteed to be called in all contexts in which it is
-    /// used (local, remote, allocator).
+    /// Registers a plugin-provided option dynamically. This function is only
+    /// valid when called from a plugin's `init()`, and must be guaranteed to be
+    /// called in all contexts in which it is used (local, remote, allocator).
     pub fn register_option(&mut self, spank_opt: SpankOption) -> Result<(), SpankError> {
         let arginfo = match spank_opt.arginfo {
             None => None,
-            Some(info) => Some(CString::new(&info as &str).or(Err(SpankError::BadArg))?),
+            Some(info) => Some(CString::new(&info as &str).or(Err(SpankError::from_str(&info)))?),
         };
-        let name = CString::new(&spank_opt.name as &str).or(Err(SpankError::BadArg))?;
+        let name =
+            CString::new(&spank_opt.name as &str).or(Err(SpankError::from_str(&spank_opt.name)))?;
         let usage = match spank_opt.usage {
             None => None,
-            Some(usage) => Some(CString::new(&usage as &str).or(Err(SpankError::BadArg))?),
+            Some(usage) => {
+                Some(CString::new(&usage as &str).or(Err(SpankError::from_str(&usage)))?)
+            }
         };
 
         let mut c_spank_opt = bindings::spank_option {
@@ -141,7 +152,7 @@ impl<'a> SpankHandle<'a> {
                 .options
                 .len()
                 .try_into()
-                .or(Err(SpankError::NoSpace))?,
+                .expect("Argument table overflow"),
         };
 
         match unsafe { bindings::spank_option_register(self.spank, &mut c_spank_opt) } {
@@ -149,7 +160,7 @@ impl<'a> SpankHandle<'a> {
                 self.opt_cache.options.push(spank_opt.name);
                 Ok(())
             }
-            e => Err(SpankError::try_from(e).unwrap_or(SpankError::Generic)),
+            e => Err(SpankError::from_spank("spank_option_register", e)),
         }
     }
 
@@ -159,7 +170,6 @@ impl<'a> SpankHandle<'a> {
         self.argv_to_vec(self.argc as usize, self.argv)
     }
 
-    // TODO: Return a better error type
     fn argv_to_vec(
         &self,
         argc: usize,
@@ -167,9 +177,11 @@ impl<'a> SpankHandle<'a> {
     ) -> Result<Vec<&str>, SpankError> {
         unsafe { slice::from_raw_parts(argv, argc) }
             .iter()
-            .map(|&arg| unsafe { CStr::from_ptr(arg) }.to_str())
+            .map(|&arg| {
+                let cstr = unsafe { CStr::from_ptr(arg) };
+                cstr.to_str().map_err(|_| SpankError::from_cstr(cstr))
+            })
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| SpankError::Generic)
     }
 
     fn argv_to_vec_os(&self, argc: usize, argv: *const *const c_char) -> Vec<&OsStr> {
@@ -179,50 +191,90 @@ impl<'a> SpankHandle<'a> {
             .collect()
     }
 
-    ///  Retrieves the environment variable `name` from the job's environment.
-    ///  It returns an error if the value is not a valid UTF-8 string.
-    pub fn getenv<N: AsRef<OsStr>>(&self, name: N) -> Result<&str, SpankError> {
-        self.do_getenv_os(name, bindings::spank_getenv)
-            .and_then(|env| env.to_str().ok_or(SpankError::Generic))
+    ///  Retrieves the environment variable `name` from the job's environment as
+    ///  a String
+    ///
+    ///  This function returns Ok(none) if the environment variable is not set.
+    ///  It returns an error if the value is not a valid UTF-8 string or if
+    ///  called outside of remote context. To access job environment variables
+    ///  from local context, use std::env directly
+    pub fn getenv<N: AsRef<OsStr>>(&self, name: N) -> Result<Option<&str>, SpankError> {
+        match self.do_getenv_os(name, bindings::spank_getenv)? {
+            None => Ok(None),
+            Some(env) => Ok(Some(env.to_str().ok_or(SpankError::from_os_str(env))?)),
+        }
     }
 
-    ///  Retrieves the environment variable `name` from the job's environment.
+    ///  Retrieves the environment variable `name` from the job's environment as
+    ///  a lossy String
+    ///
     ///  If the value contains invalid UTF-8 code points, those invalid points
-    ///  will be replaced with \u{FFFD}.
-    pub fn getenv_lossy<N: AsRef<OsStr>>(&self, name: N) -> Result<Cow<'_, str>, SpankError> {
+    ///  will be replaced with � (U+FFFD). This function returns Ok(none) if the
+    ///  environment variable is not set. It returns an error if called outside
+    ///  of remote conext. To access job environment variables from local
+    ///  context, use std::env directly
+    pub fn getenv_lossy<N: AsRef<OsStr>>(
+        &self,
+        name: N,
+    ) -> Result<Option<Cow<'_, str>>, SpankError> {
         self.do_getenv_os(name, bindings::spank_getenv)
-            .map(|s| s.to_string_lossy())
+            .and_then(|env| Ok(env.map(|s| s.to_string_lossy())))
     }
 
-    ///  Retrieves the environment variable `name` from the job's environment.
+    ///  Retrieves the environment variable `name` from the job's environment as
+    ///  an OsString
+    ///
     ///  The return value is an OsString which can hold arbitrary sequences of
-    ///  bytes on Unix-like systems.
-    pub fn getenv_os<N: AsRef<OsStr>>(&self, name: N) -> Result<&OsStr, SpankError> {
+    ///  bytes on Unix-like systems. This function returns Ok(none) if the
+    ///  environment variable is not set. It returns an error if called outside
+    ///  of remote conext. To access job environment variables from local
+    ///  context, use std::env directly
+    pub fn getenv_os<N: AsRef<OsStr>>(&self, name: N) -> Result<Option<&OsStr>, SpankError> {
         self.do_getenv_os(name, bindings::spank_getenv)
     }
 
-    ///  Retrieves the environment variable `name` from the job's control environment
-    ///  It returns an error if the value is not a valid UTF-8 string.
-    pub fn job_control_getenv<N: AsRef<OsStr>>(&self, name: N) -> Result<&str, SpankError> {
-        self.do_getenv_os(name, bindings::spank_job_control_getenv)
-            .and_then(|env| env.to_str().ok_or(SpankError::Generic))
+    ///  Retrieves the environment variable `name` from the job's control
+    ///  environment as a String
+    ///
+    ///  This function returns Ok(none) if the environment variable is not set.
+    ///  It returns an error if the value is not a valid UTF-8 string or if
+    ///  called outside of local context. To access job control environment
+    ///  variables from remote context, use std::env directly.
+    pub fn job_control_getenv<N: AsRef<OsStr>>(&self, name: N) -> Result<Option<&str>, SpankError> {
+        match self.do_getenv_os(name, bindings::spank_job_control_getenv)? {
+            None => Ok(None),
+            Some(env) => Ok(Some(env.to_str().ok_or(SpankError::from_os_str(env))?)),
+        }
     }
 
-    ///  Retrieves the environment variable `name` from the job's control environment
+    ///  Retrieves the environment variable `name` from the job's control
+    ///  environment as a lossy String
+    ///
     ///  If the value contains invalid UTF-8 code points, those invalid points
-    ///  will be replaced with \u{FFFD}.
+    ///  will be replaced with � (U+FFFD). This function returns Ok(none) if the
+    ///  environment variable is not set. It returns an error if called outside
+    ///  of local context. To access job control environment variables from
+    ///  remote context, use std::env directly.
     pub fn job_control_getenv_lossy<N: AsRef<OsStr>>(
         &self,
         name: N,
-    ) -> Result<Cow<'_, str>, SpankError> {
+    ) -> Result<Option<Cow<'_, str>>, SpankError> {
         self.do_getenv_os(name, bindings::spank_job_control_getenv)
-            .map(|s| s.to_string_lossy())
+            .and_then(|env| Ok(env.map(|s| s.to_string_lossy())))
     }
 
-    ///  Retrieves the environment variable `name` from the job's control environment
+    ///  Retrieves the environment variable `name` from the job's control
+    ///  environment as an OsString
+    ///
     ///  The return value is an OsString which can hold arbitrary sequences of
-    ///  bytes on Unix-like systems.
-    pub fn job_control_getenv_os<N: AsRef<OsStr>>(&self, name: N) -> Result<&OsStr, SpankError> {
+    ///  bytes on Unix-like systems. This function returns Ok(none) if the
+    ///  environment variable is not set. It returns an error if called outside
+    ///  of local context. To access job control environment variables from
+    ///  remote context, use std::env directly.
+    pub fn job_control_getenv_os<N: AsRef<OsStr>>(
+        &self,
+        name: N,
+    ) -> Result<Option<&OsStr>, SpankError> {
         self.do_getenv_os(name, bindings::spank_job_control_getenv)
     }
 
@@ -235,9 +287,10 @@ impl<'a> SpankHandle<'a> {
             *mut c_char,
             c_int,
         ) -> bindings::spank_err_t,
-    ) -> Result<&OsStr, SpankError> {
+    ) -> Result<Option<&OsStr>, SpankError> {
         let mut max_size = 4096;
-        let c_name = CString::new(name.as_ref().as_bytes()).map_err(|_| SpankError::BadArg)?;
+        let c_name = CString::new(name.as_ref().as_bytes())
+            .map_err(|_| SpankError::from_str(&name.as_ref().to_string_lossy()))?;
         let mut buffer = Vec::<c_char>::with_capacity(max_size);
         loop {
             buffer.resize(max_size, 0);
@@ -249,19 +302,22 @@ impl<'a> SpankHandle<'a> {
                     continue;
                 }
                 bindings::spank_err_ESPANK_SUCCESS => {
-                    return Ok(OsStr::from_bytes(
+                    return Ok(Some(OsStr::from_bytes(
                         unsafe { CStr::from_ptr(buffer_ptr) }.to_bytes(),
-                    ))
+                    )))
                 }
-                e => return Err(SpankError::try_from(e).unwrap_or(SpankError::Generic)),
+                bindings::spank_err_ESPANK_ENV_NOEXIST => return Ok(None),
+                e => return Err(SpankError::from_spank("spank_getenv", e)),
             }
         }
     }
 
-    /// Sets the environment variable `name` in the job's environment to the provided `value`.
+    /// Sets the environment variable `name` in the job's environment to the
+    /// provided `value`.
     ///
-    /// Existing values will be overwritten if `overwrite` is set.
-    /// This function can only be called from slurmstepd (remote context)
+    /// Existing values will be overwritten if `overwrite` is set. This function
+    /// will return an error if called outside of remote context. To access job
+    /// environment variables from local context, use std::env directly.
     pub fn setenv<N: AsRef<OsStr>, V: AsRef<OsStr>>(
         &self,
         name: N,
@@ -271,9 +327,12 @@ impl<'a> SpankHandle<'a> {
         self.do_setenv(name, value, overwrite, bindings::spank_setenv)
     }
 
-    /// Sets the environment variable `name` in the job's control environment to the provided `value`.
+    /// Sets the environment variable `name` in the job's control environment to
+    /// the provided `value`.
     ///
-    /// Existing values will be overwritten if `overwrite` is set.
+    /// Existing values will be overwritten if `overwrite` is set. This function
+    /// will return an error if called outside of local context. To access job
+    /// control environment variables from remote context, use std::env directly.
     pub fn job_control_setenv<N: AsRef<OsStr>, V: AsRef<OsStr>>(
         &self,
         name: N,
@@ -295,8 +354,10 @@ impl<'a> SpankHandle<'a> {
             c_int,
         ) -> bindings::spank_err_t,
     ) -> Result<(), SpankError> {
-        let c_name = CString::new(name.as_ref().as_bytes()).map_err(|_| SpankError::BadArg)?;
-        let c_value = CString::new(value.as_ref().as_bytes()).map_err(|_| SpankError::BadArg)?;
+        let c_name = CString::new(name.as_ref().as_bytes())
+            .map_err(|_| SpankError::from_os_str(name.as_ref()))?;
+        let c_value = CString::new(value.as_ref().as_bytes())
+            .map_err(|_| SpankError::from_os_str(value.as_ref()))?;
 
         match unsafe {
             spank_fn(
@@ -307,20 +368,28 @@ impl<'a> SpankHandle<'a> {
             )
         } {
             bindings::spank_err_ESPANK_SUCCESS => Ok(()),
-            e => Err(SpankError::try_from(e).unwrap_or(SpankError::Generic)),
+            bindings::spank_err_ESPANK_ENV_EXISTS => Err(SpankError::EnvExists(
+                name.as_ref().to_string_lossy().to_string(),
+            )),
+            e => Err(SpankError::from_spank("spank_setenv", e)),
         }
     }
 
     /// Unsets the environment variable `name` in the job's environment.
     ///
-    /// This function can only be called from slurmstepd (remote context)
+    /// This function is a no-op if the variable is already unset. It will return an
+    /// error if called outside of remote context. To access the job variables
+    /// from local context, use std::env directly.
     pub fn unsetenv<N: AsRef<OsStr>>(&self, name: N) -> Result<(), SpankError> {
         self.do_unsetenv(name, bindings::spank_unsetenv)
     }
 
     /// Unsets the environment variable `name` in the job's control environment.
     ///
-    /// This function can only be called from srun (local context)
+    /// This function is a no-op if the variable is already unset. It will
+    /// return an error if called outside of local context. To access job
+    /// control environment variables from remote context, use std::env
+    /// directly.
     pub fn job_control_unsetenv<N: AsRef<OsStr>>(&self, name: N) -> Result<(), SpankError> {
         self.do_unsetenv(name, bindings::spank_job_control_unsetenv)
     }
@@ -330,11 +399,12 @@ impl<'a> SpankHandle<'a> {
         name: N,
         spank_fn: unsafe extern "C" fn(bindings::spank_t, *const c_char) -> bindings::spank_err_t,
     ) -> Result<(), SpankError> {
-        let c_name = CString::new(name.as_ref().as_bytes()).map_err(|_| SpankError::BadArg)?;
+        let c_name = CString::new(name.as_ref().as_bytes())
+            .map_err(|_| SpankError::from_os_str(name.as_ref()))?;
 
         match unsafe { spank_fn(self.spank, c_name.as_ptr()) } {
             bindings::spank_err_ESPANK_SUCCESS => Ok(()),
-            e => Err(SpankError::try_from(e).unwrap_or(SpankError::Generic)),
+            e => Err(SpankError::from_spank("spank_unsetenv", e)),
         }
     }
 
@@ -342,7 +412,7 @@ impl<'a> SpankHandle<'a> {
         let name_c = if let Ok(n) = CString::new(name) {
             n
         } else {
-            return Err(SpankError::BadArg);
+            return Err(SpankError::from_str(name));
         };
 
         let mut c_spank_opt = bindings::spank_option {
@@ -367,119 +437,244 @@ impl<'a> SpankHandle<'a> {
                     Ok(None)
                 }
             }
-            e => Err(SpankError::try_from(e).unwrap_or(SpankError::Generic)),
+            e => Err(SpankError::from_spank("spank_option_getopt", e)),
         }
     }
 
-    /// Gets the value provided for the option `name`. Returns None if no value was set for this
-    /// option. If the option was specified multiple times, it returns
-    /// the last value provided.
+    /// Returns the value set for the option `name` as an OsString
     ///
-    /// *NOTE*: In remote context, use `get_option_values` to
-    /// access all values
-
+    /// If the option was specified multiple times, it returns the last value
+    /// provided. Outside of job_script context, use get_option_values to access
+    /// all values.
+    ///
+    /// *WARNING*: If options have not yet been processed (e.g in init callbacks
+    /// or all slurmd contexts), this function will always return None.
+    ///
+    /// *WARNING*: This function always returns None for options which don't
+    /// take values (flag options created without has_arg()) no matter whether
+    /// they were used or not. To check whether a flag was set, use
+    /// get_option_count.
     pub fn get_option_value_os(&self, name: &str) -> Option<Cow<'_, OsStr>> {
-        if self.context() == Ok(Context::JobScript) {
-            return self
+        match self.context() {
+            Ok(Context::JobScript) => self
                 .getopt_os(name)
-                .ok()
+                .ok() // We made sure call from the correct context
                 .map(|opt| opt.map(|value| Cow::from(value)))
-                .unwrap_or(None);
-        }
-
-        if let Some(values) = self.opt_cache.values.get(name) {
-            if let Some(Some(ref value)) = values.last() {
-                return Some(Cow::from(value));
-            } else {
-                return None;
+                .unwrap_or(None),
+            _ => {
+                if let Some(values) = self.opt_cache.values.get(name) {
+                    if let Some(Some(ref value)) = values.last() {
+                        Some(Cow::from(value))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             }
         }
-
-        None
     }
 
+    /// Returns the value set for the option `name` as a lossy String
+    ///
+    /// If the value contains invalid UTF-8 code points, those invalid points
+    /// will be replaced with � (U+FFFD). If the option was specified multiple
+    /// times, this function returns the last value provided. Outside of
+    /// job_script context, use get_option_values to access all values.
+    ///
+    /// *WARNING*: If options have not yet been processed (e.g in init callbacks
+    /// or all slurmd contexts), this function will always return None.
+    ///
+    /// *WARNING*: This function always returns None for options which don't
+    /// take values (flag options created without has_arg()) no matter whether
+    /// they were used or not. To check whether a flag was set, use
+    /// get_option_count.
     pub fn get_option_value_lossy(&self, name: &str) -> Option<Cow<'_, str>> {
         self.get_option_value_os(name)
             .map(|value| os_value_to_lossy(value))
     }
 
-    // TODO Fix error types
-    pub fn get_option_value(&self, name: &str) -> Result<Cow<'_, str>, SpankError> {
-        self.get_option_value_os(name)
-            .ok_or(SpankError::Generic)
-            .and_then(|value| os_value_to_str(value))
-    }
-
-    /// Gets the list of values provided for the option `name`. Returns None if no value was set for this
-    /// option.
-    // TODO: Implement for prolog/epilog
-    pub fn get_option_values_os(&self, name: &str) -> Option<Vec<&OsStr>> {
-        if self.context() == Ok(Context::JobScript) {
-            return None;
-        }
-
-        if let Some(values) = self.opt_cache.values.get(name) {
-            values
-                .iter()
-                .map(|opt| opt.as_deref().ok_or(()))
-                .collect::<Result<Vec<&OsStr>, ()>>()
-                .ok()
-        } else {
-            None
+    /// Returns the value set for the option `name` as a String
+    ///
+    /// An error is returned if the value cannot be converted to a String. If
+    /// the option was specified multiple times, it returns the last value
+    /// provided. Outside of job_script context, use get_option_values to access
+    /// all values.
+    ///
+    /// *WARNING*: If options have not yet been processed (e.g in init callbacks
+    /// or all slurmd contexts), this function will always return None.
+    ///
+    /// *WARNING*: This function always returns None for options which don't
+    /// take values (flag options created without has_arg()) no matter whether
+    /// they were used or not. To check whether a flag was set, use
+    /// get_option_count.
+    pub fn get_option_value(&self, name: &str) -> Result<Option<Cow<'_, str>>, SpankError> {
+        match self.get_option_value_os(name) {
+            Some(val) => Ok(Some(os_value_to_str(val)?)),
+            None => Ok(None),
         }
     }
 
+    /// Returns a list of values set for the option `name` as an OsString
+    ///
+    /// *WARNING*: In job_script context, only the last value is available.
+    ///
+    /// *WARNING*: If options have not yet been processed (e.g in init callbacks
+    /// or all slurmd contexts), this function will always return None.
+    ///
+    /// *WARNING*: This function always returns None for options which don't
+    /// take values (flag options created without has_arg()) no matter whether
+    /// they were used or not. To check whether a flag was set, use
+    /// get_option_count.
+    pub fn get_option_values_os(&self, name: &str) -> Option<Vec<Cow<'_, OsStr>>> {
+        match self.context() {
+            Ok(Context::JobScript) => self.get_option_value_os(name).map(|value| vec![value]),
+            _ => {
+                if let Some(values) = self.opt_cache.values.get(name) {
+                    values
+                        .iter()
+                        .map(|value| value.as_deref().ok_or(()).map(|opt| Cow::from(opt)))
+                        .collect::<Result<Vec<Cow<'_, OsStr>>, ()>>()
+                        .ok()
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Returns a list of values set for the option `name` as a lossy String
+    ///
+    /// If the value contains invalid UTF-8 code points, those invalid points
+    /// will be replaced with � (U+FFFD).
+    ///
+    /// *WARNING*: In job_script context, only the last value is available.
+    ///
+    /// *WARNING*: If options have not yet been processed (e.g in init callbacks
+    /// or all slurmd contexts), this function will always return None.
+    ///
+    /// *WARNING*: This function always returns None for options which don't
+    /// take values (flag options created without has_arg()) no matter whether
+    /// they were used or not. To check whether a flag was set, use
+    /// get_option_count.
     pub fn get_option_values_lossy(&self, name: &str) -> Option<Vec<Cow<'_, str>>> {
-        self.get_option_values_os(name)
-            .map(|values| values.iter().map(|opt| opt.to_string_lossy()).collect())
+        self.get_option_values_os(name).map(|values| {
+            values
+                .into_iter()
+                .map(|opt| os_value_to_lossy(opt))
+                .collect()
+        })
     }
 
-    // TODO Fix error types
-    pub fn get_option_values(&self, name: &str) -> Result<Vec<&str>, SpankError> {
-        if self.context() == Ok(Context::JobScript) {
-            return Err(SpankError::NotAvail);
-        }
-
-        self.get_option_values_os(name)
-            .ok_or(SpankError::Generic)
-            .and_then(|values| {
+    /// Returns a list of values set for the option `name` as a String
+    ///
+    /// An error is returned if the value cannot be converted to a String.
+    ///
+    /// *WARNING*: In job_script context, only the last value is available.
+    ///
+    /// *WARNING*: If options have not yet been processed (e.g in init callbacks
+    /// or all slurmd contexts), this function will always return None.
+    ///
+    /// *WARNING*: This function always returns None for options which don't
+    /// take values (flag options created without has_arg()) no matter whether
+    /// they were used or not. To check whether a flag was set, use
+    /// get_option_count().
+    pub fn get_option_values(&self, name: &str) -> Result<Option<Vec<Cow<'_, str>>>, SpankError> {
+        let values = self.get_option_values_os(name);
+        match values {
+            None => Ok(None),
+            Some(values) => Ok(Some(
                 values
-                    .iter()
-                    .map(|opt| opt.to_str().ok_or(SpankError::Generic))
-                    .collect()
-            })
+                    .into_iter()
+                    .map(|opt| os_value_to_str(opt))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+        }
     }
 
     /// Returns how many times an option was set
     ///
-    // TODO: Implement for prolog/epilog
+    /// Use this function to process flag options.
+    ///
+    /// *WARNING*: In job_script context, this function can only return 0 or 1
+    ///
+    /// *WARNING*: If options have not yet been processed (e.g in init callbacks
+    /// or all slurmd contexts), this function will always return 0.
     pub fn get_option_count(&mut self, name: &str) -> usize {
-        if self.context() == Ok(Context::JobScript) {
-            return self.getopt_os(name).is_ok() as usize;
-        }
-
-        if let Some(values) = self.opt_cache.values.get(name) {
-            values.len()
-        } else {
-            0
+        match self.context() {
+            Ok(Context::JobScript) => self.getopt_os(name).is_ok() as usize,
+            _ => {
+                if let Some(values) = self.opt_cache.values.get(name) {
+                    values.len()
+                } else {
+                    0
+                }
+            }
         }
     }
 
-    spank_item_getter!(job_gid, SpankItem::JobGid, gid_t);
-    spank_item_getter!(job_uid, SpankItem::JobUid, uid_t);
-    spank_item_getter!(job_id, SpankItem::JobId, u32);
-    spank_item_getter!(job_stepid, SpankItem::JobStepid, u32);
-    spank_item_getter!(job_nnodes, SpankItem::JobNnodes, u32);
-    spank_item_getter!(job_nodeid, SpankItem::JobNodeid, u32);
-    spank_item_getter!(job_local_task_count, SpankItem::JobLocalTaskCount, u32);
-    spank_item_getter!(job_total_task_count, SpankItem::JobTotalTaskCount, u32);
-    spank_item_getter!(job_ncpus, SpankItem::JobNcpus, u16);
+    spank_item_getter!(
+        /// Primary group id
+        job_gid,
+        SpankItem::JobGid,
+        gid_t
+    );
+    spank_item_getter!(
+        /// User id
+        job_uid,
+        SpankItem::JobUid,
+        uid_t
+    );
+    spank_item_getter!(
+        /// Slurm job id
+        job_id,
+        SpankItem::JobId,
+        u32
+    );
+    spank_item_getter!(
+        /// Slurm job step id
+        job_stepid,
+        SpankItem::JobStepid,
+        u32
+    );
+    spank_item_getter!(
+        /// Total number of nodes in job
+        job_nnodes,
+        SpankItem::JobNnodes,
+        u32
+    );
+    spank_item_getter!(
+        /// Relative id of this node
+        job_nodeid,
+        SpankItem::JobNodeid,
+        u32
+    );
+    spank_item_getter!(
+        /// Number of local tasks
+        job_local_task_count,
+        SpankItem::JobLocalTaskCount,
+        u32
+    );
+    spank_item_getter!(
+        /// Total number of tasks in job
+        job_total_task_count,
+        SpankItem::JobTotalTaskCount,
+        u32
+    );
+    spank_item_getter!(
+        /// Number of CPUs used by this job
+        job_ncpus,
+        SpankItem::JobNcpus,
+        u16
+    );
 
+    /// Command args as Strings
     pub fn job_argv(&self) -> Result<Vec<&str>, SpankError> {
         self.job_argv_c()
             .and_then(|(argc, argv)| self.argv_to_vec(argc, argv))
     }
 
+    /// Command args as OsStrings
     pub fn job_argv_os(&self) -> Result<Vec<&OsStr>, SpankError> {
         self.job_argv_c()
             .and_then(|(argc, argv)| Ok(self.argv_to_vec_os(argc, argv)))
@@ -495,53 +690,91 @@ impl<'a> SpankHandle<'a> {
         match unsafe {
             bindings::spank_get_item(self.spank, SpankItem::JobArgv.into(), argc_ptr, argv_ptr)
         } {
-            bindings::spank_err_ESPANK_SUCCESS => Ok((argc as usize, argv)),
-            e => Err(SpankError::try_from(e).unwrap_or(SpankError::Generic)),
+            bindings::spank_err_ESPANK_SUCCESS => {
+                if argv.is_null() {
+                    panic!("spank_get_item returned unexpected NULL ptr");
+                }
+                Ok((argc as usize, argv))
+            }
+            e => Err(SpankError::from_spank("sapnk_get_item", e)),
         }
     }
 
+    /// Job env array as Strings
     pub fn job_env(&self) -> Result<Vec<&str>, SpankError> {
         self.job_env_c()
             .and_then(|(argc, argv)| self.argv_to_vec(argc, argv))
     }
 
+    /// Job env array as OsStrings
     pub fn job_env_os(&self) -> Result<Vec<&OsStr>, SpankError> {
         self.job_env_c()
             .and_then(|(argc, argv)| Ok(self.argv_to_vec_os(argc, argv)))
     }
 
     fn job_env_c(&self) -> Result<(usize, *const *const c_char), SpankError> {
-        let mut argv: *const *const c_char = ptr::null_mut();
-        let argv_ptr: *mut *const *const c_char = &mut argv;
+        let mut envv: *const *const c_char = ptr::null_mut();
 
-        match unsafe { bindings::spank_get_item(self.spank, SpankItem::JobEnv.into(), argv_ptr) } {
+        match unsafe { bindings::spank_get_item(self.spank, SpankItem::JobEnv.into(), &mut envv) } {
             bindings::spank_err_ESPANK_SUCCESS => {
-                if argv.is_null() {
-                    return Err(SpankError::Generic);
+                if envv.is_null() {
+                    panic!("spank_get_item returned unexpected NULL ptr")
                 }
                 let mut argc: isize = 0;
-                while !unsafe { *argv.offset(argc as isize) }.is_null() {
+                while !unsafe { *envv.offset(argc as isize) }.is_null() {
                     argc += 1;
                 }
-                Ok((argc as usize, argv))
+                Ok((argc as usize, envv))
             }
-            e => Err(SpankError::try_from(e).unwrap_or(SpankError::Generic)),
+            e => Err(SpankError::from_spank("spank_get_item", e)),
         }
     }
 
-    spank_item_getter!(task_id, SpankItem::TaskId, c_int);
-    spank_item_getter!(task_global_id, SpankItem::TaskGlobalId, u32);
-    spank_item_getter!(task_exit_status, SpankItem::TaskExitStatus, c_int);
-    spank_item_getter!(task_pid, SpankItem::TaskPid, pid_t);
     spank_item_getter!(
+        /// Local task id
+        task_id,
+        SpankItem::TaskId,
+        c_int
+    );
+
+    spank_item_getter!(
+        /// Global task id
+        task_global_id,
+        SpankItem::TaskGlobalId,
+        u32
+    );
+
+    spank_item_getter!(
+        /// Exit status of task if exited
+        task_exit_status,
+        SpankItem::TaskExitStatus,
+        c_int
+    );
+
+    spank_item_getter!(
+        /// Task pid
+        task_pid,
+        SpankItem::TaskPid,
+        pid_t
+    );
+    spank_item_getter!(
+        /// Global task id from pid
         pid_to_global_id,
         SpankItem::JobPidToGlobalId,
         pid,
         pid_t,
         u32
     );
-    spank_item_getter!(pid_to_local_id, SpankItem::JobPidToLocalId, pid, pid_t, u32);
     spank_item_getter!(
+        /// Local task id from pid
+        pid_to_local_id,
+        SpankItem::JobPidToLocalId,
+        pid,
+        pid_t,
+        u32
+    );
+    spank_item_getter!(
+        /// Local id to global id
         local_to_global_id,
         SpankItem::JobLocalToGlobalId,
         local_id,
@@ -549,6 +782,7 @@ impl<'a> SpankHandle<'a> {
         u32
     );
     spank_item_getter!(
+        /// Global id to local id
         global_to_local_id,
         SpankItem::JobGlobalToLocalId,
         global_id,
@@ -556,6 +790,7 @@ impl<'a> SpankHandle<'a> {
         u32
     );
 
+    /// Vec of supplementary gids
     pub fn job_supplmentary_gids(&self) -> Result<Vec<gid_t>, SpankError> {
         let mut gidc: c_int = 0;
         let mut gidv: *const gid_t = ptr::null_mut();
@@ -577,22 +812,84 @@ impl<'a> SpankHandle<'a> {
                     .map(|&gid| gid)
                     .collect::<Vec<gid_t>>())
             }
-            e => Err(SpankError::try_from(e).unwrap_or(SpankError::Generic)),
+            e => Err(SpankError::from_spank("spank_get_item", e)),
         }
     }
 
-    spank_item_getter!(slurm_version, SpankItem::SlurmVersion, &str);
-    spank_item_getter!(slurm_version_major, SpankItem::SlurmVersionMajor, &str);
-    spank_item_getter!(slurm_version_minor, SpankItem::SlurmVersionMinor, &str);
-    spank_item_getter!(slurm_version_micro, SpankItem::SlurmVersionMicro, &str);
-    spank_item_getter!(step_cpus_per_task, SpankItem::StepCpusPerTask, u64);
-    spank_item_getter!(job_alloc_cores, SpankItem::JobAllocCores, u64);
-    spank_item_getter!(job_alloc_mem, SpankItem::JobAllocMem, u64);
-    spank_item_getter!(step_alloc_cores, SpankItem::StepAllocCores, u64);
-    spank_item_getter!(step_alloc_mem, SpankItem::StepAllocMem, u64);
-    spank_item_getter!(slurm_restart_count, SpankItem::SlurmRestartCount, u32);
-    spank_item_getter!(job_array_id, SpankItem::JobArrayId, u32);
-    spank_item_getter!(job_array_task_id, SpankItem::JobArrayTaskId, u32);
+    spank_item_getter!(
+        /// Current Slurm version
+        slurm_version,
+        SpankItem::SlurmVersion,
+        &str
+    );
+
+    spank_item_getter!(
+        /// Slurm version major release
+        slurm_version_major,
+        SpankItem::SlurmVersionMajor,
+        &str
+    );
+    spank_item_getter!(
+        /// Slurm version minor release
+        slurm_version_minor,
+        SpankItem::SlurmVersionMinor,
+        &str
+    );
+    spank_item_getter!(
+        /// Slurm version micro release
+        slurm_version_micro,
+        SpankItem::SlurmVersionMicro,
+        &str
+    );
+    spank_item_getter!(
+        /// CPUs allocated per task/ Returns 1 if --overcommit option is used
+        step_cpus_per_task,
+        SpankItem::StepCpusPerTask,
+        u64
+    );
+
+    spank_item_getter!(
+        /// Job allocated cores in list format
+        job_alloc_cores,
+        SpankItem::JobAllocCores,
+        &str
+    );
+    spank_item_getter!(
+        ///Job allocated memory in MB
+        job_alloc_mem,
+        SpankItem::JobAllocMem,
+        u64
+    );
+    spank_item_getter!(
+        /// Step allocated cores in list format
+        step_alloc_cores,
+        SpankItem::StepAllocCores,
+        &str
+    );
+    spank_item_getter!(
+        /// Step allocated memory in MB
+        step_alloc_mem,
+        SpankItem::StepAllocMem,
+        u64
+    );
+    spank_item_getter!(
+        /// Job restart count
+        slurm_restart_count,
+        SpankItem::SlurmRestartCount,
+        u32
+    );
+    spank_item_getter!(
+        /// Slurm job array id
+        job_array_id,
+        SpankItem::JobArrayId,
+        u32
+    );
+    spank_item_getter!(
+        /// Slurm job array task id
+        job_array_task_id,
+        SpankItem::JobArrayTaskId,
+        u32
+    );
 }
 
 fn cstring_escape_null(msg: &str) -> CString {
@@ -671,29 +968,27 @@ macro_rules! SPANK_PLUGIN {
         }
 
         #[no_mangle]
-        pub extern "C" fn spank_opt_cb(
-            val: c_int,
-            optarg: *const c_char,
-            _remote: c_int,
-        ) -> c_int {
-            callback_with_globals (|_, cache| {
-                let name = cache.options.get(val as usize).ok_or_else(|| {
-                    spank_log(
-                        LogLevel::Error,
-                        &format!(
-                            "Internal spank plugin error: received unexpected option callback {}",
+        pub extern "C" fn spank_opt_cb(val: c_int, optarg: *const c_char, _remote: c_int) -> c_int {
+            callback_with_globals(|_, cache| {
+                let name = cache
+                    .options
+                    .get(val as usize)
+                    .ok_or_else(|| {
+                        format!(
+                            "Internal spank-rs error: received unexpected option callback {}",
                             val
-                        ),
-                    );
-                    SpankError::Generic
-                }).map(|name| name.clone())?;
+                        )
+                    })
+                    .map(|name| name.clone())?;
 
                 let optarg = {
                     if optarg == ptr::null() {
                         None
                     } else {
-                        Some(OsStr::from_bytes(unsafe { CStr::from_ptr(optarg) }.to_bytes())
-                                .to_os_string())
+                        Some(
+                            OsStr::from_bytes(unsafe { CStr::from_ptr(optarg) }.to_bytes())
+                                .to_os_string(),
+                        )
                     }
                 };
 
@@ -711,7 +1006,7 @@ macro_rules! SPANK_PLUGIN {
                     ac: c_int,
                     argv: *const *const c_char,
                 ) -> c_int {
-                    callback_with_globals (|plugin, options| {
+                    callback_with_globals(|plugin, options| {
                         let mut spank = SpankHandle {
                             spank: spank,
                             opt_cache: options,
@@ -723,21 +1018,19 @@ macro_rules! SPANK_PLUGIN {
                         plugin.$rust_spank_cb(&mut spank)
                     })
                 }
-            }
+            };
         }
 
         fn callback_with_globals<F>(func: F) -> c_int
-            where F: FnOnce(&mut $spank_ty, &mut OptionCache)-> Result<(), SpankError> + UnwindSafe
+        where
+            F: FnOnce(&mut $spank_ty, &mut OptionCache) -> Result<(), Box<dyn Error>> + UnwindSafe,
         {
             let unwind_res = catch_unwind(|| {
                 let global = match GLOBAL.try_lock() {
                     Ok(global) => global,
 
                     Err(e) => {
-                        spank_log(
-                            LogLevel::Error,
-                            &format!("Internal spank plugin error: {:?}\n", e),
-                        );
+                        spank_log(LogLevel::Error, &format!("Internal spank-rs error: {}", e));
                         return bindings::spank_err_ESPANK_ERROR as c_int;
                     }
                 };
@@ -745,9 +1038,12 @@ macro_rules! SPANK_PLUGIN {
                 let mut plugin = global.plugin.borrow_mut();
                 let mut options = global.options.borrow_mut();
 
-                match func(&mut plugin, &mut options){
+                match func(&mut plugin, &mut options) {
                     Ok(()) => bindings::spank_err_ESPANK_SUCCESS as c_int,
-                    Err(_) => bindings::spank_err_ESPANK_ERROR as c_int,
+                    Err(e) => {
+                        plugin.handle_error(e.into());
+                        bindings::spank_err_ESPANK_ERROR as c_int
+                    }
                 }
             });
 
@@ -774,41 +1070,44 @@ macro_rules! SPANK_PLUGIN {
 
 #[allow(unused_variables)]
 pub trait Plugin {
-    fn init(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
+    fn init(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    fn job_prolog(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
+    fn job_prolog(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    fn init_post_opt(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
+    fn init_post_opt(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    fn local_user_init(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
+    fn local_user_init(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    fn user_init(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
+    fn user_init(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    fn task_init_privileged(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
+    fn task_init_privileged(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    fn task_init(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
+    fn task_init(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    fn task_post_fork(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
+    fn task_post_fork(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    fn task_exit(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
+    fn task_exit(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    fn job_epilog(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
+    fn job_epilog(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    fn slurmd_exit(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
+    fn slurmd_exit(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    fn exit(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
+    fn exit(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
+    }
+    fn handle_error(&self, error: Box<dyn Error>) {
+        spank_log(LogLevel::Error, &error.to_string())
     }
 }
 
@@ -849,9 +1148,10 @@ enum SpankItem {
     JobArrayTaskId = bindings::spank_item_S_JOB_ARRAY_TASK_ID,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, IntoPrimitive, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, PartialEq, IntoPrimitive, FromPrimitive)]
 #[repr(u32)] // FIXME: force the type generated by bindgen
-pub enum SpankError {
+pub enum SpankApiError {
+    #[num_enum(default)]
     Generic = bindings::spank_err_ESPANK_ERROR,
     BadArg = bindings::spank_err_ESPANK_BAD_ARG,
     NotTask = bindings::spank_err_ESPANK_NOT_TASK,
@@ -865,16 +1165,80 @@ pub enum SpankError {
     NotLocal = bindings::spank_err_ESPANK_NOT_LOCAL,
 }
 
-impl Error for SpankError {}
+impl Error for SpankApiError {}
 
-impl fmt::Display for SpankError {
+impl fmt::Display for SpankApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let cerr = unsafe { CStr::from_ptr(bindings::spank_strerror(*self as u32)) };
 
         if let Ok(err) = cerr.to_str() {
             write!(f, "{}", err)
         } else {
-            write!(f, "Invalid Error")
+            write!(f, "Unknown Error")
+        }
+    }
+}
+
+impl Error for SpankError {}
+
+#[derive(Debug, Clone)]
+pub enum SpankError {
+    CStringError(String),
+    EnvExists(String),
+    IdNotFound(u32),
+    PidNotFound(pid_t),
+    SpankAPI(String, SpankApiError),
+    Utf8Error(String),
+}
+
+impl SpankError {
+    fn from_os_str(s: &OsStr) -> SpankError {
+        SpankError::Utf8Error(s.to_string_lossy().to_string())
+    }
+    fn from_str(s: &str) -> SpankError {
+        SpankError::CStringError(s.to_string())
+    }
+    fn from_cstr(s: &CStr) -> SpankError {
+        SpankError::CStringError(s.to_string_lossy().to_string())
+    }
+    fn from_spank(name: &str, err: u32) -> SpankError {
+        SpankError::SpankAPI(name.to_owned(), SpankApiError::from(err))
+    }
+}
+
+trait FromNoExist<T> {
+    fn from_noexist(v: T) -> SpankError;
+}
+
+impl FromNoExist<u32> for SpankError {
+    fn from_noexist(v: u32) -> SpankError {
+        SpankError::IdNotFound(v)
+    }
+}
+
+impl FromNoExist<pid_t> for SpankError {
+    fn from_noexist(v: pid_t) -> SpankError {
+        SpankError::PidNotFound(v)
+    }
+}
+
+impl fmt::Display for SpankError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SpankError::SpankAPI(name, e) => {
+                write!(f, "Error calling SPANK API function {}: {}", name, e)
+            }
+            SpankError::Utf8Error(s) => write!(f, "Cannot parse {} as UTF-8", s),
+            SpankError::CStringError(s) => {
+                write!(f, "String {} cannot be converted to a C string", s)
+            }
+            SpankError::EnvExists(s) => write!(
+                f,
+                "Environment variable {} exists and overwrite was not set",
+                s
+            ),
+            SpankError::PidNotFound(p) => write!(f, "Could not find pid {}", p),
+            SpankError::IdNotFound(i) => write!(f, "Could not find id {}", i),
         }
     }
 }
@@ -908,7 +1272,7 @@ impl SpankOption {
         self.usage = Some(usage.to_string());
         self
     }
-    pub fn has_arg(mut self, arg_name: &str) -> Self {
+    pub fn takes_value(mut self, arg_name: &str) -> Self {
         self.arginfo = Some(arg_name.to_string());
         self
     }
@@ -921,7 +1285,7 @@ struct TestSpank {
 }
 
 impl Plugin for TestSpank {
-    fn init(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
+    fn init(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         println!("Plugin arguments: {:?}", spank.plugin_argv());
         println!("Context is {:?}", spank.context()?);
         self.data = 20;
@@ -929,14 +1293,14 @@ impl Plugin for TestSpank {
         println!("{:?}", spank.job_env());
         Ok(())
     }
-    fn task_init(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
+    fn task_init(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         spank_log(
             LogLevel::Error,
             &format!("{:?}", spank.job_supplmentary_gids()?),
         );
         Ok(())
     }
-    fn task_exit(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
+    fn task_exit(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         spank_log(
             LogLevel::Error,
             &format!("Job env task exit {:?}", spank.job_env()?),
@@ -944,7 +1308,7 @@ impl Plugin for TestSpank {
 
         Ok(())
     }
-    fn exit(&mut self, spank: &mut SpankHandle) -> Result<(), SpankError> {
+    fn exit(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         println!("Data is {:?}", self.data);
         println!("CB returned {:?}", spank.get_option_value_os("opt_a"));
 
