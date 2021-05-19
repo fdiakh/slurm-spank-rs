@@ -1,13 +1,11 @@
 [package]
-name = "slurm-spank-rs"
+name = "slurm-spank"
 version = "0.1.0"
 authors = ["Francois Diakhate <fdiakh@gmail.com>"]
 edition = "2018"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
-name = "slurm_spank_rs"
-crate-type = ["cdylib"]
+name = "slurm_spank"
 
 [dependencies]
 byte-strings = "0.1.3"

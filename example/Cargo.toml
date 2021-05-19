@@ -1,0 +1,12 @@
+[package]
+name = "slurm-spank-example"
+version = "0.1.0"
+authors = ["Francois Diakhate <fdiakh@gmail.com>"]
+edition = "2018"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+slurm-spank = { path = "../"}
+
