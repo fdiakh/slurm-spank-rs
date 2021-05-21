@@ -1,5 +1,6 @@
 //! Rust interface for writing Slurm SPANK Plugins
 use byte_strings::c_str;
+use lazy_static::lazy_static;
 use libc::{gid_t, pid_t, uid_t};
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 use std::borrow::Cow;
@@ -12,6 +13,7 @@ use std::os::raw::{c_char, c_int};
 use std::os::unix::ffi::OsStrExt;
 use std::panic::catch_unwind;
 use std::panic::UnwindSafe;
+use std::sync::Mutex;
 use std::{ptr, slice};
 
 pub mod spank_sys;
@@ -20,10 +22,9 @@ pub mod spank_sys;
 /// plugins. It provides methods to query Slurm from a plugin.
 pub struct SpankHandle<'a> {
     spank: spank_sys::spank_t,
-    opt_cache: &'a mut OptionCache,
     argc: c_int,
     argv: *const *const c_char,
-    spank_opt_cb: unsafe extern "C" fn(c_int, *const c_char, c_int) -> c_int,
+    opt_cache: &'a mut OptionCache,
 }
 
 macro_rules! spank_item_getter {
@@ -100,11 +101,11 @@ fn os_value_to_str(value: Cow<'_, OsStr>) -> Result<Cow<'_, str>, SpankError> {
 // only use getopt (prolog/epilog). This is an attempt at providing a uniform
 // interface by caching callbacks or calls to getopt which feels quite hackish.
 // We should try to find a cleaner interface.
-#[derive(Default)]
+#[derive(Default, Debug)]
 #[doc(hidden)]
 pub struct OptionCache {
     pub options: Vec<String>,
-    pub values: HashMap<String, Vec<Option<OsString>>>,
+    pub values: HashMap<String, Option<OsString>>,
 }
 
 impl<'a> SpankHandle<'a> {
@@ -135,7 +136,7 @@ impl<'a> SpankHandle<'a> {
         let mut c_spank_opt = spank_sys::spank_option {
             name: name.as_ptr(),
             has_arg: arginfo.is_some() as i32,
-            cb: Some(self.spank_opt_cb),
+            cb: Some(spank_option_callback),
             arginfo: match arginfo {
                 Some(ref arginfo) => arginfo.as_ptr(),
                 None => ptr::null(),
@@ -437,12 +438,48 @@ impl<'a> SpankHandle<'a> {
             e => Err(SpankError::from_spank("spank_option_getopt", e)),
         }
     }
+    /// Returns the value set for the option `name` as a lossy String
+    ///
+    /// If the value contains invalid UTF-8 code points, those invalid points
+    /// will be replaced with � (U+FFFD). If the option was specified multiple
+    /// times, this function returns the last value provided.
+    ///
+    /// *WARNING*: If options have not yet been processed (e.g in init callbacks
+    /// or all slurmd contexts), this function will always return None.
+    ///
+    /// *WARNING*: This function always returns None for options which don't
+    /// take values (flag options created without has_arg()) no matter whether
+    /// they were used or not. To check whether a flag was set, use
+    /// is_option_set.
+    pub fn get_option_value_lossy(&self, name: &str) -> Option<Cow<'_, str>> {
+        self.get_option_value_os(name)
+            .map(|value| os_value_to_lossy(value))
+    }
+
+    /// Returns the value set for the option `name` as a String
+    ///
+    /// An error is returned if the value cannot be converted to a String. If
+    /// the option was specified multiple times, it returns the last value
+    /// provided.
+    ///
+    /// *WARNING*: If options have not yet been processed (e.g in init callbacks
+    /// or all slurmd contexts), this function will always return None.
+    ///
+    /// *WARNING*: This function always returns None for options which don't
+    /// take values (flag options created without has_arg()) no matter whether
+    /// they were used or not. To check whether a flag was set, use
+    /// is_option_set.
+    pub fn get_option_value(&self, name: &str) -> Result<Option<Cow<'_, str>>, SpankError> {
+        match self.get_option_value_os(name) {
+            Some(val) => Ok(Some(os_value_to_str(val)?)),
+            None => Ok(None),
+        }
+    }
 
     /// Returns the value set for the option `name` as an OsString
     ///
     /// If the option was specified multiple times, it returns the last value
-    /// provided. Outside of job_script context, use get_option_values to access
-    /// all values.
+    /// provided.
     ///
     /// *WARNING*: If options have not yet been processed (e.g in init callbacks
     /// or all slurmd contexts), this function will always return None.
@@ -459,12 +496,8 @@ impl<'a> SpankHandle<'a> {
                 .map(|opt| opt.map(|value| Cow::from(value)))
                 .unwrap_or(None),
             _ => {
-                if let Some(values) = self.opt_cache.values.get(name) {
-                    if let Some(Some(ref value)) = values.last() {
-                        Some(Cow::from(value))
-                    } else {
-                        None
-                    }
+                if let Some(Some(ref value)) = self.opt_cache.values.get(name) {
+                    Some(Cow::from(value))
                 } else {
                     None
                 }
@@ -472,141 +505,16 @@ impl<'a> SpankHandle<'a> {
         }
     }
 
-    /// Returns the value set for the option `name` as a lossy String
-    ///
-    /// If the value contains invalid UTF-8 code points, those invalid points
-    /// will be replaced with � (U+FFFD). If the option was specified multiple
-    /// times, this function returns the last value provided. Outside of
-    /// job_script context, use get_option_values to access all values.
-    ///
-    /// *WARNING*: If options have not yet been processed (e.g in init callbacks
-    /// or all slurmd contexts), this function will always return None.
-    ///
-    /// *WARNING*: This function always returns None for options which don't
-    /// take values (flag options created without has_arg()) no matter whether
-    /// they were used or not. To check whether a flag was set, use
-    /// get_option_count.
-    pub fn get_option_value_lossy(&self, name: &str) -> Option<Cow<'_, str>> {
-        self.get_option_value_os(name)
-            .map(|value| os_value_to_lossy(value))
-    }
-
-    /// Returns the value set for the option `name` as a String
-    ///
-    /// An error is returned if the value cannot be converted to a String. If
-    /// the option was specified multiple times, it returns the last value
-    /// provided. Outside of job_script context, use get_option_values to access
-    /// all values.
-    ///
-    /// *WARNING*: If options have not yet been processed (e.g in init callbacks
-    /// or all slurmd contexts), this function will always return None.
-    ///
-    /// *WARNING*: This function always returns None for options which don't
-    /// take values (flag options created without has_arg()) no matter whether
-    /// they were used or not. To check whether a flag was set, use
-    /// get_option_count.
-    pub fn get_option_value(&self, name: &str) -> Result<Option<Cow<'_, str>>, SpankError> {
-        match self.get_option_value_os(name) {
-            Some(val) => Ok(Some(os_value_to_str(val)?)),
-            None => Ok(None),
-        }
-    }
-
-    /// Returns a list of values set for the option `name` as an OsString
-    ///
-    /// *WARNING*: In job_script context, only the last value is available.
-    ///
-    /// *WARNING*: If options have not yet been processed (e.g in init callbacks
-    /// or all slurmd contexts), this function will always return None.
-    ///
-    /// *WARNING*: This function always returns None for options which don't
-    /// take values (flag options created without has_arg()) no matter whether
-    /// they were used or not. To check whether a flag was set, use
-    /// get_option_count.
-    pub fn get_option_values_os(&self, name: &str) -> Option<Vec<Cow<'_, OsStr>>> {
-        match self.context() {
-            Ok(Context::JobScript) => self.get_option_value_os(name).map(|value| vec![value]),
-            _ => {
-                if let Some(values) = self.opt_cache.values.get(name) {
-                    values
-                        .iter()
-                        .map(|value| value.as_deref().ok_or(()).map(|opt| Cow::from(opt)))
-                        .collect::<Result<Vec<Cow<'_, OsStr>>, ()>>()
-                        .ok()
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    /// Returns a list of values set for the option `name` as a lossy String
-    ///
-    /// If the value contains invalid UTF-8 code points, those invalid points
-    /// will be replaced with � (U+FFFD).
-    ///
-    /// *WARNING*: In job_script context, only the last value is available.
-    ///
-    /// *WARNING*: If options have not yet been processed (e.g in init callbacks
-    /// or all slurmd contexts), this function will always return None.
-    ///
-    /// *WARNING*: This function always returns None for options which don't
-    /// take values (flag options created without has_arg()) no matter whether
-    /// they were used or not. To check whether a flag was set, use
-    /// get_option_count.
-    pub fn get_option_values_lossy(&self, name: &str) -> Option<Vec<Cow<'_, str>>> {
-        self.get_option_values_os(name).map(|values| {
-            values
-                .into_iter()
-                .map(|opt| os_value_to_lossy(opt))
-                .collect()
-        })
-    }
-
-    /// Returns a list of values set for the option `name` as a String
-    ///
-    /// An error is returned if the value cannot be converted to a String.
-    ///
-    /// *WARNING*: In job_script context, only the last value is available.
-    ///
-    /// *WARNING*: If options have not yet been processed (e.g in init callbacks
-    /// or all slurmd contexts), this function will always return None.
-    ///
-    /// *WARNING*: This function always returns None for options which don't
-    /// take values (flag options created without has_arg()) no matter whether
-    /// they were used or not. To check whether a flag was set, use
-    /// get_option_count().
-    pub fn get_option_values(&self, name: &str) -> Result<Option<Vec<Cow<'_, str>>>, SpankError> {
-        let values = self.get_option_values_os(name);
-        match values {
-            None => Ok(None),
-            Some(values) => Ok(Some(
-                values
-                    .into_iter()
-                    .map(|opt| os_value_to_str(opt))
-                    .collect::<Result<Vec<_>, _>>()?,
-            )),
-        }
-    }
-
-    /// Returns how many times an option was set
+    /// Returns whether an option was set
     ///
     /// Use this function to process flag options.
     ///
-    /// *WARNING*: In job_script context, this function can only return 0 or 1
-    ///
     /// *WARNING*: If options have not yet been processed (e.g in init callbacks
-    /// or all slurmd contexts), this function will always return 0.
-    pub fn get_option_count(&mut self, name: &str) -> usize {
+    /// or all slurmd contexts), this function will always return false.
+    pub fn is_option_set(&mut self, name: &str) -> bool {
         match self.context() {
-            Ok(Context::JobScript) => self.getopt_os(name).is_ok() as usize,
-            _ => {
-                if let Some(values) = self.opt_cache.values.get(name) {
-                    values.len()
-                } else {
-                    0
-                }
-            }
+            Ok(Context::JobScript) => self.getopt_os(name).is_ok(),
+            _ => self.opt_cache.values.get(name).is_some(),
         }
     }
 
@@ -929,55 +837,93 @@ pub fn spank_log(level: LogLevel, msg: &str) {
     }
 }
 
-static mut GLOBAL: Option<GlobalData> = None;
-static mut PANICKED: bool = false;
-
-struct GlobalData {
-    options: OptionCache,
-    plugin: Box<dyn Plugin>,
+// XXX: Slurm should only call us in a sequential and non-reentrant way but Rust
+// doesn't know that. The overhead of locking these Mutex at each Slurm callback
+// should be negligible and we'll get a clear error if something is called out
+// of order by mistake. However this is not ideal because it requires the Plugin
+// to be Send which can be restricting. We should probably confirm with Slurm
+// devs that all calls are sequential and move to a static mut or similar.
+lazy_static! {
+    static ref OPTION_CACHE: Mutex<OptionCache> = Mutex::new(OptionCache::default());
+    static ref PLUGIN: Mutex<Option<Box<dyn Plugin>>> = Mutex::new(None);
 }
 
 #[doc(hidden)]
-// XXX This function is dangerous since it relies on a static mut to get a
-// handle on the global data for a plugin. It should only be called from Slurm
-// callbacks generated by the SPANK_PLUGIN macros which is why we have to mark
-// it public nonetheless.  We rely on Slurm to only call the various SPANK
-// callbacks sequentially within a process.
-pub fn callback_with_globals<P: Plugin + Default + 'static, F>(func: F) -> c_int
+pub fn spank_callback_with_globals<P: Plugin + Default + 'static, F>(func: F) -> c_int
 where
     F: FnOnce(&mut dyn Plugin, &mut OptionCache) -> Result<(), Box<dyn Error>> + UnwindSafe,
 {
-    if unsafe { PANICKED } {
-        return spank_sys::spank_err_ESPANK_ERROR as c_int;
-    }
-
     let unwind_res = catch_unwind(|| {
-        let mut global = unsafe { GLOBAL.take() }.unwrap_or(GlobalData {
-            options: OptionCache::default(),
-            plugin: Box::new(P::default()),
-        });
+        // These Mutexes should never be contended unless something unreoverable
+        // happened before
+        let mut opt_cache = OPTION_CACHE
+            .try_lock()
+            .expect("Failed to acquire global options mutex");
+        let mut plugin_option = PLUGIN
+            .try_lock()
+            .expect("Failed to acquire global plugin mutex");
 
-        let err = match func(global.plugin.as_mut(), &mut global.options) {
-            Ok(()) => spank_sys::spank_err_ESPANK_SUCCESS as c_int,
+        let mut plugin = plugin_option.take().unwrap_or(Box::new(P::default()));
+
+        let err = match func(plugin.as_mut(), &mut opt_cache) {
+            Ok(()) => 0,
             Err(e) => {
-                global.plugin.handle_error(e.into());
-                spank_sys::spank_err_ESPANK_ERROR as c_int
+                plugin.handle_error(e.into());
+                -1
             }
         };
-        unsafe { GLOBAL.replace(global) };
+        plugin_option.replace(plugin);
 
         err
     });
 
     match unwind_res {
         Ok(e) => e,
-        //spank_sys::spank_err_ESPANK_ERROR as c_int
-        // Store Paniced in global
-        Err(_) => {
-            unsafe { PANICKED = true };
-            spank_sys::spank_err_ESPANK_ERROR as c_int
-        }
+        Err(_) => -1,
     }
+}
+
+#[no_mangle]
+pub extern "C" fn spank_option_callback(
+    val: std::os::raw::c_int,
+    optarg: *const std::os::raw::c_char,
+    _remote: std::os::raw::c_int,
+) -> std::os::raw::c_int {
+    // This Mutex should never be contended unless something unrecoverable
+    // already happened before
+    let mut opt_cache = OPTION_CACHE
+        .try_lock()
+        .expect("Failed to acquire global options mutex");
+
+    let name = opt_cache.options.get(val as usize).map(|name| name.clone());
+
+    let name = match name {
+        None => {
+            spank_log(
+                LogLevel::Error,
+                &format!(
+                    "Internal spank-rs error: received unexpected option callback {}",
+                    val
+                ),
+            );
+            return -1;
+        }
+        Some(name) => name,
+    };
+
+    let optarg = {
+        if optarg == std::ptr::null() {
+            None
+        } else {
+            Some(
+                std::ffi::OsStr::from_bytes(unsafe { std::ffi::CStr::from_ptr(optarg) }.to_bytes())
+                    .to_os_string(),
+            )
+        }
+    };
+
+    opt_cache.values.insert(name, optarg);
+    -1
 }
 
 #[doc(hidden)]
@@ -985,76 +931,34 @@ where
 // generated by the macro. It should no be called to create handles manually.
 pub fn init_spank_handle<'a>(
     spank: spank_sys::spank_t,
-    opt_cache: &'a mut OptionCache,
     argc: c_int,
     argv: *const *const c_char,
-    spank_opt_cb: unsafe extern "C" fn(c_int, *const c_char, c_int) -> c_int,
+    opt_cache: &'a mut OptionCache,
 ) -> SpankHandle<'a> {
     SpankHandle {
         spank,
-        opt_cache,
         argc,
         argv,
-        spank_opt_cb,
+        opt_cache,
     }
 }
 
 #[macro_export]
 macro_rules! SPANK_PLUGIN {
     ($spank_name:literal, $spank_version:literal, $spank_ty:ty) => {
-        #[repr(C)]
-        #[doc(hidden)]
-        // Simple struct to export a static immutable C string
-        pub struct StaticCStr(pub *const u8);
-        unsafe impl Sync for StaticCStr {}
-
+        const fn byte_string_size<T>(_: &T) -> usize {
+            std::mem::size_of::<T>()
+        }
         #[no_mangle]
-        pub static plugin_name: StaticCStr = StaticCStr($spank_name as *const u8);
+        pub static plugin_name: [u8; byte_string_size($spank_name)] = *$spank_name;
         #[no_mangle]
-        pub static plugin_type: StaticCStr = StaticCStr(b"spank\0" as *const u8);
+        pub static mut plugin_type: [u8; 6] = *b"spank\0";
         #[no_mangle]
-        pub static plugin_version: std::os::raw::c_int = $spank_version;
+        pub static plugin_version: std::os::raw::c_uint = $spank_version;
 
         fn _check_spank_trait<T: Plugin>() {}
         fn _t() {
             _check_spank_trait::<$spank_ty>()
-        }
-
-        #[no_mangle]
-        pub extern "C" fn spank_opt_cb(
-            val: std::os::raw::c_int,
-            optarg: *const std::os::raw::c_char,
-            _remote: std::os::raw::c_int,
-        ) -> std::os::raw::c_int {
-            use std::os::unix::ffi::OsStrExt;
-            slurm_spank::callback_with_globals::<$spank_ty, _>(|_, cache| {
-                let name = cache
-                    .options
-                    .get(val as usize)
-                    .ok_or_else(|| {
-                        format!(
-                            "Internal spank-rs error: received unexpected option callback {}",
-                            val
-                        )
-                    })
-                    .map(|name| name.clone())?;
-
-                let optarg = {
-                    if optarg == std::ptr::null() {
-                        None
-                    } else {
-                        Some(
-                            std::ffi::OsStr::from_bytes(
-                                unsafe { std::ffi::CStr::from_ptr(optarg) }.to_bytes(),
-                            )
-                            .to_os_string(),
-                        )
-                    }
-                };
-
-                cache.values.entry(name).or_insert(vec![]).push(optarg);
-                Ok(())
-            })
         }
 
         macro_rules! spank_hook {
@@ -1066,10 +970,8 @@ macro_rules! SPANK_PLUGIN {
                     ac: std::os::raw::c_int,
                     argv: *const *const std::os::raw::c_char,
                 ) -> std::os::raw::c_int {
-                    slurm_spank::callback_with_globals::<$spank_ty, _>(|plugin, options| {
-                        let mut spank =
-                            slurm_spank::init_spank_handle(spank, options, ac, argv, spank_opt_cb);
-
+                    slurm_spank::spank_callback_with_globals::<$spank_ty, _>(|plugin, options| {
+                        let mut spank = slurm_spank::init_spank_handle(spank, ac, argv, options);
                         plugin.$rust_spank_cb(&mut spank)
                     })
                 }
@@ -1092,7 +994,7 @@ macro_rules! SPANK_PLUGIN {
 }
 
 #[allow(unused_variables)]
-pub trait Plugin {
+pub trait Plugin: Send {
     fn init(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
