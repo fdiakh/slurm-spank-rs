@@ -923,7 +923,7 @@ pub extern "C" fn spank_option_callback(
     };
 
     opt_cache.values.insert(name, optarg);
-    -1
+    0
 }
 
 #[doc(hidden)]
