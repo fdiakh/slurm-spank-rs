@@ -837,12 +837,54 @@ pub fn spank_log(level: LogLevel, msg: &str) {
     }
 }
 
+#[macro_export]
+macro_rules! spank_log_error {
+    ($($arg:tt)*) => ({
+        $crate::spank_log($crate::LogLevel::Error,&format!($($arg)*));
+    })
+}
+
+#[macro_export]
+macro_rules! spank_log_info {
+    ($($arg:tt)*) => ({
+        $crate::spank_log($crate::LogLevel::Info, &format!($($arg)*));
+    })
+}
+
+#[macro_export]
+macro_rules! spank_log_verbose {
+    ($($arg:tt)*) => ({
+        $crate::spank_log($crate::LogLevel::Verbose, &format!($($arg)*));
+    })
+}
+
+#[macro_export]
+macro_rules! spank_log_debug {
+    ($($arg:tt)*) => ({
+        $crate::spank_log($crate::LogLevel::Debug, &format!($($arg)*));
+    })
+}
+
+#[macro_export]
+macro_rules! spank_log_debug2 {
+    ($($arg:tt)*) => ({
+        $crate::spank_log($crate::LogLevel::Debug2, &format!($($arg)*));
+    })
+}
+
+#[macro_export]
+macro_rules! spank_log_debug3 {
+    ($($arg:tt)*) => ({
+        $crate::spank_log($crate::LogLevel::Debug3, &format!($($arg)*));
+    })
+}
+
 // XXX: Slurm should only call us in a sequential and non-reentrant way but Rust
 // doesn't know that. The overhead of locking these Mutex at each Slurm callback
 // should be negligible and we'll get a clear error if something is called out
 // of order by mistake. However this is not ideal because it requires the Plugin
 // to be Send which can be restricting. We should probably confirm with Slurm
-// devs that all calls are sequential and move to a static mut or similar.
+// devs that all calls are sequential and switch to a static mut or similar.
 lazy_static! {
     static ref OPTION_CACHE: Mutex<OptionCache> = Mutex::new(OptionCache::default());
     static ref PLUGIN: Mutex<Option<Box<dyn Plugin>>> = Mutex::new(None);
@@ -1032,7 +1074,7 @@ pub trait Plugin: Send {
         Ok(())
     }
     fn handle_error(&self, error: Box<dyn Error>) {
-        spank_log(LogLevel::Error, &error.to_string())
+        spank_log(LogLevel::Info, &format!("{:?}", error));
     }
 }
 
