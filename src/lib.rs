@@ -196,10 +196,12 @@ impl<'a> SpankHandle<'a> {
     ///  It returns an error if the value is not a valid UTF-8 string or if
     ///  called outside of remote context. To access job environment variables
     ///  from local context, use std::env directly
-    pub fn getenv<N: AsRef<OsStr>>(&self, name: N) -> Result<Option<&str>, SpankError> {
+    pub fn getenv<N: AsRef<OsStr>>(&self, name: N) -> Result<Option<String>, SpankError> {
         match self.do_getenv_os(name, spank_sys::spank_getenv)? {
             None => Ok(None),
-            Some(env) => Ok(Some(env.to_str().ok_or(SpankError::from_os_str(env))?)),
+            Some(env) => Ok(Some(
+                env.into_string().map_err(|e| SpankError::from_os_str(&e))?,
+            )),
         }
     }
 
@@ -211,12 +213,9 @@ impl<'a> SpankHandle<'a> {
     ///  environment variable is not set. It returns an error if called outside
     ///  of remote conext. To access job environment variables from local
     ///  context, use std::env directly
-    pub fn getenv_lossy<N: AsRef<OsStr>>(
-        &self,
-        name: N,
-    ) -> Result<Option<Cow<'_, str>>, SpankError> {
+    pub fn getenv_lossy<N: AsRef<OsStr>>(&self, name: N) -> Result<Option<String>, SpankError> {
         self.do_getenv_os(name, spank_sys::spank_getenv)
-            .and_then(|env| Ok(env.map(|s| s.to_string_lossy())))
+            .and_then(|env| Ok(env.map(|s| s.to_string_lossy().into_owned())))
     }
 
     ///  Retrieves the environment variable `name` from the job's environment as
@@ -227,7 +226,7 @@ impl<'a> SpankHandle<'a> {
     ///  environment variable is not set. It returns an error if called outside
     ///  of remote conext. To access job environment variables from local
     ///  context, use std::env directly
-    pub fn getenv_os<N: AsRef<OsStr>>(&self, name: N) -> Result<Option<&OsStr>, SpankError> {
+    pub fn getenv_os<N: AsRef<OsStr>>(&self, name: N) -> Result<Option<OsString>, SpankError> {
         self.do_getenv_os(name, spank_sys::spank_getenv)
     }
 
@@ -236,12 +235,17 @@ impl<'a> SpankHandle<'a> {
     ///
     ///  This function returns Ok(none) if the environment variable is not set.
     ///  It returns an error if the value is not a valid UTF-8 string or if
-    ///  called outside of local context. To access job control environment
-    ///  variables from remote context, use std::env directly.
-    pub fn job_control_getenv<N: AsRef<OsStr>>(&self, name: N) -> Result<Option<&str>, SpankError> {
+    ///  called outside of local/allocator context. To access job control environment
+    ///  variables from job script context, use std::env directly.
+    pub fn job_control_getenv<N: AsRef<OsStr>>(
+        &self,
+        name: N,
+    ) -> Result<Option<String>, SpankError> {
         match self.do_getenv_os(name, spank_sys::spank_job_control_getenv)? {
             None => Ok(None),
-            Some(env) => Ok(Some(env.to_str().ok_or(SpankError::from_os_str(env))?)),
+            Some(env) => Ok(Some(
+                env.into_string().map_err(|e| SpankError::from_os_str(&e))?,
+            )),
         }
     }
 
@@ -251,14 +255,14 @@ impl<'a> SpankHandle<'a> {
     ///  If the value contains invalid UTF-8 code points, those invalid points
     ///  will be replaced with � (U+FFFD). This function returns Ok(none) if the
     ///  environment variable is not set. It returns an error if called outside
-    ///  of local context. To access job control environment variables from
-    ///  remote context, use std::env directly.
+    ///  of local/allocator context. To access job control environment variables from
+    ///  job script context, use std::env directly.
     pub fn job_control_getenv_lossy<N: AsRef<OsStr>>(
         &self,
         name: N,
-    ) -> Result<Option<Cow<'_, str>>, SpankError> {
+    ) -> Result<Option<String>, SpankError> {
         self.do_getenv_os(name, spank_sys::spank_job_control_getenv)
-            .and_then(|env| Ok(env.map(|s| s.to_string_lossy())))
+            .and_then(|env| Ok(env.map(|s| s.to_string_lossy().into_owned())))
     }
 
     ///  Retrieves the environment variable `name` from the job's control
@@ -267,12 +271,12 @@ impl<'a> SpankHandle<'a> {
     ///  The return value is an OsString which can hold arbitrary sequences of
     ///  bytes on Unix-like systems. This function returns Ok(none) if the
     ///  environment variable is not set. It returns an error if called outside
-    ///  of local context. To access job control environment variables from
-    ///  remote context, use std::env directly.
+    ///  of local/allocator context. To access job control environment variables from
+    ///  job script context, use std::env directly.
     pub fn job_control_getenv_os<N: AsRef<OsStr>>(
         &self,
         name: N,
-    ) -> Result<Option<&OsStr>, SpankError> {
+    ) -> Result<Option<OsString>, SpankError> {
         self.do_getenv_os(name, spank_sys::spank_job_control_getenv)
     }
 
@@ -285,7 +289,7 @@ impl<'a> SpankHandle<'a> {
             *mut c_char,
             c_int,
         ) -> spank_sys::spank_err_t,
-    ) -> Result<Option<&OsStr>, SpankError> {
+    ) -> Result<Option<OsString>, SpankError> {
         let mut max_size = 4096;
         let c_name = CString::new(name.as_ref().as_bytes())
             .map_err(|_| SpankError::from_str(&name.as_ref().to_string_lossy()))?;
@@ -293,18 +297,23 @@ impl<'a> SpankHandle<'a> {
         loop {
             buffer.resize(max_size, 0);
             let buffer_ptr = buffer.as_mut_ptr();
-
-            match unsafe { spank_fn(self.spank, c_name.as_ptr(), buffer_ptr, max_size as i32) } {
+            match unsafe {
+                spank_fn(
+                    self.spank,
+                    c_name.as_ptr(),
+                    buffer_ptr as *mut c_char,
+                    max_size as i32,
+                )
+            } {
+                spank_sys::spank_err_ESPANK_ENV_NOEXIST => return Ok(None),
+                spank_sys::spank_err_ESPANK_SUCCESS => {
+                    let cstr = unsafe { CStr::from_ptr(buffer_ptr) };
+                    return Ok(Some(OsStr::from_bytes(cstr.to_bytes()).to_os_string()));
+                }
                 spank_sys::spank_err_ESPANK_NOSPACE => {
                     max_size *= 2;
                     continue;
                 }
-                spank_sys::spank_err_ESPANK_SUCCESS => {
-                    return Ok(Some(OsStr::from_bytes(
-                        unsafe { CStr::from_ptr(buffer_ptr) }.to_bytes(),
-                    )))
-                }
-                spank_sys::spank_err_ESPANK_ENV_NOEXIST => return Ok(None),
                 e => return Err(SpankError::from_spank("spank_getenv", e)),
             }
         }
@@ -337,7 +346,7 @@ impl<'a> SpankHandle<'a> {
         value: V,
         overwrite: bool,
     ) -> Result<(), SpankError> {
-        self.do_setenv(name, value, overwrite, spank_sys::spank_setenv)
+        self.do_setenv(name, value, overwrite, spank_sys::spank_job_control_setenv)
     }
 
     pub fn do_setenv<N: AsRef<OsStr>, V: AsRef<OsStr>>(
@@ -385,7 +394,7 @@ impl<'a> SpankHandle<'a> {
     /// Unsets the environment variable `name` in the job's control environment.
     ///
     /// This function is a no-op if the variable is already unset. It will
-    /// return an error if called outside of local context. To access job
+    /// return an error if called outside of local/allocator context. To access job
     /// control environment variables from remote context, use std::env
     /// directly.
     pub fn job_control_unsetenv<N: AsRef<OsStr>>(&self, name: N) -> Result<(), SpankError> {
