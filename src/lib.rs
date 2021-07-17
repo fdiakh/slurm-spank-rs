@@ -1,5 +1,4 @@
 //! Rust interface for writing Slurm SPANK Plugins
-use byte_strings::c_str;
 use lazy_static::lazy_static;
 use libc::{gid_t, pid_t, uid_t};
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
@@ -15,6 +14,12 @@ use std::panic::catch_unwind;
 use std::panic::UnwindSafe;
 use std::sync::Mutex;
 use std::{ptr, slice};
+use tracing::{error, span};
+use tracing_core::{Event, Subscriber};
+use tracing_subscriber::fmt::{layer, FmtContext, FormatEvent, FormatFields, FormattedFields};
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::{EnvFilter, Registry};
 
 pub mod spank_sys;
 
@@ -38,7 +43,7 @@ macro_rules! spank_item_getter {
             } {
                 spank_sys::spank_err_ESPANK_SUCCESS => Ok(res),
                 spank_sys::spank_err_ESPANK_NOEXIST => Err(SpankError::from_noexist($arg_name)),
-                e => Err(SpankError::from_spank("spank_get_item", e)),
+                e => Err(SpankError::from_spank_item("spank_get_item", $spank_item, e)),
             }
         }
     };
@@ -57,7 +62,7 @@ macro_rules! spank_item_getter {
                             .map_err(|_| SpankError::Utf8Error(cstr.to_string_lossy().to_string()))
                     }
                 }
-                e => Err(SpankError::from_spank("spank_get_item", e)),
+                e => Err(SpankError::from_spank_item("spank_get_item", $spank_item, e)),
             }
         }
     };
@@ -68,7 +73,7 @@ macro_rules! spank_item_getter {
             let res_ptr: *mut $result_type = &mut res;
             match unsafe { spank_sys::spank_get_item(self.spank, $spank_item.into(), res_ptr) } {
                 spank_sys::spank_err_ESPANK_SUCCESS => Ok(res),
-                e => Err(SpankError::from_spank("spank_get_item", e)),
+                e => Err(SpankError::from_spank_item("spank_get_item", $spank_item, e)),
             }
         }
     };
@@ -827,22 +832,20 @@ pub enum LogLevel {
     Debug3,
 }
 
+static FORMAT_STRING: [u8; 3] = *b"%s\0";
+
 pub fn spank_log(level: LogLevel, msg: &str) {
     let c_msg = cstring_escape_null(msg);
+    let c_format_string = FORMAT_STRING.as_ptr() as *const i8;
 
     match level {
-        LogLevel::Error => unsafe { spank_sys::slurm_error(c_str!("%s").as_ptr(), c_msg.as_ptr()) },
-        LogLevel::Info => unsafe { spank_sys::slurm_info(c_str!("%s").as_ptr(), c_msg.as_ptr()) },
-        LogLevel::Verbose => unsafe {
-            spank_sys::slurm_verbose(c_str!("%s").as_ptr(), c_msg.as_ptr())
-        },
-        LogLevel::Debug => unsafe { spank_sys::slurm_debug(c_str!("%s").as_ptr(), c_msg.as_ptr()) },
-        LogLevel::Debug2 => unsafe {
-            spank_sys::slurm_debug2(c_str!("%s").as_ptr(), c_msg.as_ptr())
-        },
-        LogLevel::Debug3 => unsafe {
-            spank_sys::slurm_debug3(c_str!("%s").as_ptr(), c_msg.as_ptr())
-        },
+        // TODO: no need for c_str dep just for this
+        LogLevel::Error => unsafe { spank_sys::slurm_error(c_format_string, c_msg.as_ptr()) },
+        LogLevel::Info => unsafe { spank_sys::slurm_info(c_format_string, c_msg.as_ptr()) },
+        LogLevel::Verbose => unsafe { spank_sys::slurm_verbose(c_format_string, c_msg.as_ptr()) },
+        LogLevel::Debug => unsafe { spank_sys::slurm_debug(c_format_string, c_msg.as_ptr()) },
+        LogLevel::Debug2 => unsafe { spank_sys::slurm_debug2(c_format_string, c_msg.as_ptr()) },
+        LogLevel::Debug3 => unsafe { spank_sys::slurm_debug3(c_format_string, c_msg.as_ptr()) },
     }
 }
 
@@ -902,7 +905,7 @@ lazy_static! {
 #[doc(hidden)]
 pub fn spank_callback_with_globals<P: Plugin + Default + 'static, F>(func: F) -> c_int
 where
-    F: FnOnce(&mut dyn Plugin, &mut OptionCache) -> Result<(), Box<dyn Error>> + UnwindSafe,
+    F: FnOnce(&mut dyn Plugin, &mut OptionCache, bool) -> Result<(), Box<dyn Error>> + UnwindSafe,
 {
     let unwind_res = catch_unwind(|| {
         // These Mutexes should never be contended unless something unreoverable
@@ -914,14 +917,17 @@ where
             .try_lock()
             .expect("Failed to acquire global plugin mutex");
 
-        let mut plugin = plugin_option.take().unwrap_or(Box::new(P::default()));
+        let mut need_setup = false;
 
-        let err = match func(plugin.as_mut(), &mut opt_cache) {
+        let mut plugin = plugin_option.take().unwrap_or_else(|| {
+            let p = P::default();
+            need_setup = true;
+            Box::new(p)
+        });
+
+        let err = match func(plugin.as_mut(), &mut opt_cache, need_setup) {
             Ok(()) => 0,
-            Err(e) => {
-                plugin.handle_error(e.into());
-                -1
-            }
+            Err(_) => -1,
         };
         plugin_option.replace(plugin);
 
@@ -935,7 +941,9 @@ where
 }
 
 #[no_mangle]
-pub extern "C" fn spank_option_callback(
+// We pass this callback to process all spank options
+// It just stores which options were set in a cache for later retrieval
+extern "C" fn spank_option_callback(
     val: std::os::raw::c_int,
     optarg: *const std::os::raw::c_char,
     _remote: std::os::raw::c_int,
@@ -979,7 +987,7 @@ pub extern "C" fn spank_option_callback(
 
 #[doc(hidden)]
 // This function only public so that it may be called from the callbacks
-// generated by the macro. It should no be called to create handles manually.
+// generated by the macro. It should not be called to create handles manually.
 pub fn init_spank_handle<'a>(
     spank: spank_sys::spank_t,
     argc: c_int,
@@ -991,6 +999,17 @@ pub fn init_spank_handle<'a>(
         argc,
         argv,
         opt_cache,
+    }
+}
+
+#[doc(hidden)]
+// This function is only public so that it may be called from the callbacks
+// generated by the macro.
+pub fn make_cb_span(id: &str, cb: &str, ctx: &str, task_id: Option<u32>) -> tracing::Span {
+    if let Some(task_id) = task_id {
+        span!(tracing::Level::DEBUG, "spank", id, cb, ctx, task_id)
+    } else {
+        span!(tracing::Level::DEBUG, "spank", id, cb, ctx)
     }
 }
 
@@ -1017,14 +1036,42 @@ macro_rules! SPANK_PLUGIN {
                 #[no_mangle]
                 #[doc(hidden)]
                 pub extern "C" fn $c_spank_cb(
-                    spank: slurm_spank::spank_sys::spank_t,
+                    spank: $crate::spank_sys::spank_t,
                     ac: std::os::raw::c_int,
                     argv: *const *const std::os::raw::c_char,
                 ) -> std::os::raw::c_int {
-                    slurm_spank::spank_callback_with_globals::<$spank_ty, _>(|plugin, options| {
-                        let mut spank = slurm_spank::init_spank_handle(spank, ac, argv, options);
-                        plugin.$rust_spank_cb(&mut spank)
-                    })
+                    $crate::spank_callback_with_globals::<$spank_ty, _>(
+                        |plugin, options, need_setup| {
+                            let mut spank = $crate::init_spank_handle(spank, ac, argv, options);
+
+                            if need_setup {
+                                plugin.setup(&mut spank).map_err(|e| {
+                                    plugin.report_error(e.as_ref());
+                                    e
+                                })?;
+                            }
+
+                            let context = spank
+                                .context()
+                                .map(|ctx| format!("{:?}", ctx))
+                                .unwrap_or("Error".to_string());
+
+                            let tid = spank.task_global_id().ok();
+
+                            let span = $crate::make_cb_span(
+                                std::ffi::CStr::from_bytes_with_nul(&plugin_name)?.to_str()?,
+                                stringify!($c_spank_cb),
+                                &context,
+                                tid,
+                            );
+                            let _guard = span.enter();
+
+                            plugin.$rust_spank_cb(&mut spank).map_err(|e| {
+                                plugin.report_error(e.as_ref());
+                                e
+                            })
+                        },
+                    )
                 }
             };
         }
@@ -1082,8 +1129,102 @@ pub trait Plugin: Send {
     fn exit(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
-    fn handle_error(&self, error: Box<dyn Error>) {
-        spank_log(LogLevel::Info, &format!("{:?}", error));
+    fn report_error(&self, error: &dyn Error) {
+        // TODO: use error iterators once theyre stable
+        let mut report = error.to_string();
+        let mut error = error;
+        while let Some(source) = error.source() {
+            report.push_str(&format!(": {}", source));
+            error = source;
+        }
+        error!("{}", &report);
+    }
+
+    fn setup(&self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
+        let default_level = match spank.context()? {
+            Context::Local => "error",
+            _ => "debug",
+        };
+        let filter_layer =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
+        let fmt_layer = layer()
+            .event_format(SpankTraceFormatter {})
+            .with_writer(SpankTraceWriter {});
+        let filter_layer = Registry::default()
+            .with(filter_layer)
+            .with(fmt_layer)
+            .init();
+        Ok(())
+    }
+}
+
+struct SpankTraceFormatter;
+
+impl<S, N> FormatEvent<S, N> for SpankTraceFormatter
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        writer: &mut dyn fmt::Write,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        // Write level
+        let level = *event.metadata().level();
+        write!(writer, "{}: ", level.to_string().to_lowercase())?;
+
+        // Write spans and fields of each span
+        ctx.visit_spans(|span| {
+            write!(writer, "{}", span.name())?;
+
+            let ext = span.extensions();
+
+            // `FormattedFields` is a a formatted representation of the span's
+            // fields, which is stored in its extensions by the `fmt` layer's
+            // `new_span` method. The fields will have been formatted
+            // by the same field formatter that's provided to the event
+            // formatter in the `FmtContext`.
+            let fields = &ext
+                .get::<FormattedFields<N>>()
+                .expect("will never be `None`");
+
+            if !fields.is_empty() {
+                write!(writer, "{{{}}}", fields)?;
+            }
+            write!(writer, ": ")?;
+
+            Ok(())
+        })?;
+
+        // Write fields on the event
+        ctx.field_format().format_fields(writer, event)
+    }
+}
+
+struct SpankTraceWriter {}
+
+impl tracing_subscriber::fmt::MakeWriter for SpankTraceWriter {
+    type Writer = Self;
+
+    fn make_writer(&self) -> Self::Writer {
+        Self {}
+    }
+}
+
+impl std::io::Write for SpankTraceWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let c_string = CString::new(buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
+
+        unsafe { spank_sys::slurm_info(FORMAT_STRING.as_ptr() as *const i8, c_string.as_ptr()) };
+
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -1179,6 +1320,9 @@ impl SpankError {
     }
     fn from_spank(name: &str, err: u32) -> SpankError {
         SpankError::SpankAPI(name.to_owned(), SpankApiError::from(err))
+    }
+    fn from_spank_item(name: &str, arg: SpankItem, err: u32) -> SpankError {
+        SpankError::SpankAPI(format!("{}({:?})", name, arg), SpankApiError::from(err))
     }
 }
 
