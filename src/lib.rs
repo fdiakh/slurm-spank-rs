@@ -462,7 +462,7 @@ impl<'a> SpankHandle<'a> {
     /// or all slurmd contexts), this function will always return None.
     ///
     /// *WARNING*: This function always returns None for options which don't
-    /// take values (flag options created without has_arg()) no matter whether
+    /// take values (flag options created without takes_value()) no matter whether
     /// they were used or not. To check whether a flag was set, use
     /// is_option_set.
     pub fn get_option_value_lossy(&self, name: &str) -> Option<Cow<'_, str>> {
@@ -480,7 +480,7 @@ impl<'a> SpankHandle<'a> {
     /// or all slurmd contexts), this function will always return None.
     ///
     /// *WARNING*: This function always returns None for options which don't
-    /// take values (flag options created without has_arg()) no matter whether
+    /// take values (flag options created without takes_value()) no matter whether
     /// they were used or not. To check whether a flag was set, use
     /// is_option_set.
     pub fn get_option_value(&self, name: &str) -> Result<Option<Cow<'_, str>>, SpankError> {
@@ -499,7 +499,7 @@ impl<'a> SpankHandle<'a> {
     /// or all slurmd contexts), this function will always return None.
     ///
     /// *WARNING*: This function always returns None for options which don't
-    /// take values (flag options created without has_arg()) no matter whether
+    /// take values (flag options created without takes_value()) no matter whether
     /// they were used or not. To check whether a flag was set, use
     /// get_option_count.
     pub fn get_option_value_os(&self, name: &str) -> Option<Cow<'_, OsStr>> {
