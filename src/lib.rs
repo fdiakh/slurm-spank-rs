@@ -936,7 +936,19 @@ where
 
     match unwind_res {
         Ok(e) => e,
-        Err(_) => -1,
+        Err(panic) => {
+            let panic_string = panic
+                .downcast::<&str>()
+                .map(|b| b.to_string())
+                .or_else(|panic| panic.downcast::<String>().map(|s| *s))
+                .unwrap_or("non-string panic".to_string());
+
+            spank_log_error!(
+                "Caught panic while running spank callback: {}",
+                panic_string
+            );
+            -1
+        }
     }
 }
 
