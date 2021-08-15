@@ -1,4 +1,198 @@
-//! Rust interface for writing Slurm SPANK Plugins
+//!Rust bindings for writing Slurm SPANK Plugins
+//!# Introduction
+//!This crate allows to write Slurm SPANK plugins using Rust. To learn more
+//!about capabilities available through SPANK please refer to the official
+//![`SPANK documentation`].
+//!
+//! [`SPANK documentation`]: https://slurm.schedmd.com/spank.html
+//!
+//!To create a SPANK plugin using this crate, you need to define a struct for
+//!which you implement the [`Plugin`] trait and to make it available as a SPANK
+//!plugin using the [`SPANK_PLUGIN!`] macro.
+//!
+//!The methods of the Plugin trait correspond to the callbacks defined by the
+//!SPANK API such as [`init_post_opt`], [`task_post_fork`] etc. Theses methods
+//!have a default implementation which means you only need to implement the
+//!callbacks relevent for your plugin.
+//!
+//! [`init_post_opt`]: crate::Plugin::init_post_opt
+//!
+//! [`task_post_fork`]: crate::Plugin::task_post_fork
+//!
+//!Each callback method is passed a [`SpankHandle`] reference which allows to
+//!interact with Slurm through the SPANK API.
+//!
+//!When returning an [`Err`] from a callback an error message will be displayed
+//!and/or logged by default, depending on the context. This behaviour may be
+//!overriden by the [`report_error`] method. A default [`Subscriber`] is also
+//!configured to facilitate the use of the [`tracing`] crate for logging and
+//!error reporting while using SPANK log facilities, such as in the exemple
+//!below. This can be overriden by the [`setup`] method.
+//!
+//! [`report_error`]: crate::Plugin::report_error
+//!
+//! [`Subscriber`]: tracing::Subscriber
+//!
+//! [`setup`]: crate::Plugin::setup
+//!
+//!# Example: renice.so
+//!The following example shows how to implement the renice plugin that is given
+//!as an example of using the C API in the Slurm [`SPANK documentation`].
+//!```rust,no_run
+//!use eyre::{eyre, Report, WrapErr};
+//!use libc::{setpriority, PRIO_PROCESS};
+//!use slurm_spank::{Context, Plugin, SpankHandle, SpankOption, SPANK_PLUGIN};
+//!use std::error::Error;
+//!use tracing::{error, info};
+//!
+//!//  Minimum allowable value for priority. May be
+//!//  set globally via plugin option min_prio=<prio>
+//!const MIN_PRIO: i32 = -20;
+//!const PRIO_ENV_VAR: &str = "SLURM_RENICE";
+//!
+//!// All spank plugins must define this macro for the
+//!// Slurm plugin loader.
+//!SPANK_PLUGIN!(b"renice\0", 0x130502, SpankRenice);
+//!
+//!struct SpankRenice {
+//!    min_prio: i32,
+//!    prio: Option<i32>,
+//!}
+//!
+//!// A default instance of the plugin is created when it
+//!// is loaded by Slurm
+//!impl Default for SpankRenice {
+//!    fn default() -> Self {
+//!        Self {
+//!            // Minimum allowable value for priority. May be
+//!            // set globally via plugin option min_prio=<prio>
+//!            min_prio: MIN_PRIO,
+//!            prio: None,
+//!        }
+//!    }
+//!}
+//!
+//!impl Plugin for SpankRenice {
+//!    fn init(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
+//!        // Don't do anything in sbatch/salloc
+//!        if spank.context()? == Context::Allocator {
+//!            return Ok(());
+//!        }
+//!
+//!        // Parse plugin configuration file
+//!        for arg in spank.plugin_argv().wrap_err("Invalid plugin argument")? {
+//!            match arg.strip_prefix("min_prio=") {
+//!                Some(value) => self.min_prio = parse_prio(value).wrap_err("Invalid min_prio")?,
+//!                None => return Err(eyre!("Invalid plugin argument: {}", arg).into()),
+//!            }
+//!        }
+//!
+//!        // Provide a --renice=prio option to srun
+//!        spank
+//!            .register_option(
+//!                SpankOption::new("renice")
+//!                    .takes_value("prio")
+//!                    .usage("Re-nice job tasks to priority [prio]"),
+//!            )
+//!            .wrap_err("Failed to register renice option")?;
+//!
+//!        Ok(())
+//!    }
+//!    fn init_post_opt(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
+//!        // Skip argument processing outside of relevent contexts
+//!        match spank.context()? {
+//!            Context::Local | Context::Remote => (),
+//!            _ => return Ok(()),
+//!        }
+//!
+//!        let prio = spank
+//!            .get_option_value("renice")
+//!            .wrap_err("Failed to read --renice option")?;
+//!
+//!        let prio = match prio {
+//!            None => {
+//!                return Ok(());
+//!            }
+//!            Some(prio) => prio,
+//!        };
+//!
+//!        self.set_prio(&prio, "--renice")
+//!            .wrap_err("Bad value for --renice")?;
+//!
+//!        Ok(())
+//!    }
+//!
+//!    fn task_post_fork(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
+//!        if self.prio.is_none() {
+//!            // See if SLURM_RENICE env var is set by user
+//!            if let Some(prio) = spank
+//!                .getenv(PRIO_ENV_VAR)
+//!                .wrap_err(format!("Bad value for {}", PRIO_ENV_VAR))?
+//!            {
+//!                self.set_prio(&prio, PRIO_ENV_VAR)
+//!                    .wrap_err_with(|| format!("Bad value for {}", PRIO_ENV_VAR))?;
+//!            }
+//!        }
+//!
+//!        if let Some(prio) = self.prio {
+//!            let task_id = spank.task_global_id()?;
+//!            let pid = spank.task_pid()?;
+//!
+//!            info!("re-nicing task{} pid {} to {}", task_id, pid, prio);
+//!            if unsafe { setpriority(PRIO_PROCESS, pid as u32, prio) } < 0 {
+//!                return Err(Report::new(std::io::Error::last_os_error())
+//!                    .wrap_err("setpriority")
+//!                    .into());
+//!            }
+//!        }
+//!        Ok(())
+//!    }
+//!}
+//!
+//!impl SpankRenice {
+//!    fn set_prio(&mut self, prio: &str, opt_name: &str) -> Result<(), Report> {
+//!        let prio = parse_prio(prio)?;
+//!
+//!        self.prio = if prio >= self.min_prio {
+//!            Some(prio)
+//!        } else {
+//!            error!(
+//!                "{}={} is not allowed, will use min_prio ({})",
+//!                opt_name, prio, self.min_prio
+//!            );
+//!            Some(self.min_prio)
+//!        };
+//!
+//!        Ok(())
+//!    }
+//!}
+//!
+//!fn parse_prio(value: &str) -> Result<i32, Report> {
+//!    let value: i32 = value.parse()?;
+//!    match value {
+//!        -20..=19 => Ok(value),
+//!        _ => Err(eyre!("Priority is not between -20 and 19")),
+//!    }
+//!}
+//!
+//! ```
+//! The following Cargo.toml can be used to build this example plugin
+//!```toml
+//![package]
+//!name = "slurm-spank-example"
+//!version = "0.1.0"
+//!authors = ["Francois Diakhate <fdiakh@gmail.com>"]
+//!edition = "2018"
+//!
+//![lib]
+//!crate-type = ["cdylib"]
+//!
+//![dependencies]
+//!eyre = "0.6.5"
+//!libc = "0.2.99"
+//!slurm-spank = { path = "../slurm-spank"}
+//!tracing = "0.1.26"
+//!```
 use lazy_static::lazy_static;
 use libc::{gid_t, pid_t, uid_t};
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
@@ -21,10 +215,11 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{EnvFilter, Registry};
 
+#[doc(hidden)]
 pub mod spank_sys;
 
-/// This struct represents a handle to the Slurm interface exposed to SPANK
-/// plugins. It provides methods to query Slurm from a plugin.
+/// Handle to the Slurm interface exposed to SPANK plugins. It provides methods
+/// to query Slurm from a plugin.
 pub struct SpankHandle<'a> {
     spank: spank_sys::spank_t,
     argc: c_int,
@@ -533,67 +728,68 @@ impl<'a> SpankHandle<'a> {
     }
 
     spank_item_getter!(
-        /// Primary group id
+        /// Returns the primary group id
         job_gid,
         SpankItem::JobGid,
         gid_t
     );
     spank_item_getter!(
-        /// User id
+        /// Returns the user id
         job_uid,
         SpankItem::JobUid,
         uid_t
     );
     spank_item_getter!(
-        /// Slurm job id
+        /// Returns the  job id
         job_id,
         SpankItem::JobId,
         u32
     );
     spank_item_getter!(
-        /// Slurm job step id
+        /// Returns the job step id
         job_stepid,
         SpankItem::JobStepid,
         u32
     );
     spank_item_getter!(
-        /// Total number of nodes in job
+        /// Returns the total number of nodes in job
         job_nnodes,
         SpankItem::JobNnodes,
         u32
     );
     spank_item_getter!(
-        /// Relative id of this node
+        /// Returns the relative id of this node
         job_nodeid,
         SpankItem::JobNodeid,
         u32
     );
     spank_item_getter!(
-        /// Number of local tasks
+        /// Returns the number of local tasks
         job_local_task_count,
         SpankItem::JobLocalTaskCount,
         u32
     );
     spank_item_getter!(
-        /// Total number of tasks in job
+        /// Returns the total number of tasks in job
         job_total_task_count,
         SpankItem::JobTotalTaskCount,
         u32
     );
     spank_item_getter!(
-        /// Number of CPUs used by this job
+        /// Returns the number of CPUs used by this job
         job_ncpus,
         SpankItem::JobNcpus,
         u16
     );
 
-    /// Command args as Strings
+    /// Returns the job command arguments as Vec<&str>. An error is returned if
+    /// arguments are not valid UTF-8
     pub fn job_argv(&self) -> Result<Vec<&str>, SpankError> {
         self.job_argv_c()
             .and_then(|(argc, argv)| self.argv_to_vec(argc, argv))
     }
 
-    /// Command args as OsStrings
+    /// Returns the job command args as Vec<&OsStr>
     pub fn job_argv_os(&self) -> Result<Vec<&OsStr>, SpankError> {
         self.job_argv_c()
             .and_then(|(argc, argv)| Ok(self.argv_to_vec_os(argc, argv)))
@@ -619,13 +815,14 @@ impl<'a> SpankHandle<'a> {
         }
     }
 
-    /// Job env array as Strings
+    /// Returns the job environment variables as a Vec<&str>. An error is
+    /// returned if variables are not valid UTF-8
     pub fn job_env(&self) -> Result<Vec<&str>, SpankError> {
         self.job_env_c()
             .and_then(|(argc, argv)| self.argv_to_vec(argc, argv))
     }
 
-    /// Job env array as OsStrings
+    /// Returns the job environment variables as an array of Vec<&OsStr>
     pub fn job_env_os(&self) -> Result<Vec<&OsStr>, SpankError> {
         self.job_env_c()
             .and_then(|(argc, argv)| Ok(self.argv_to_vec_os(argc, argv)))
@@ -651,34 +848,34 @@ impl<'a> SpankHandle<'a> {
     }
 
     spank_item_getter!(
-        /// Local task id
+        /// Returns the local task id
         task_id,
         SpankItem::TaskId,
         c_int
     );
 
     spank_item_getter!(
-        /// Global task id
+        /// Returns the global task id
         task_global_id,
         SpankItem::TaskGlobalId,
         u32
     );
 
     spank_item_getter!(
-        /// Exit status of task if exited
+        /// Returns the exit status of the current task if exited
         task_exit_status,
         SpankItem::TaskExitStatus,
         c_int
     );
 
     spank_item_getter!(
-        /// Task pid
+        /// Returns the pid of the current task
         task_pid,
         SpankItem::TaskPid,
         pid_t
     );
     spank_item_getter!(
-        /// Global task id from pid
+        /// Returns the the global task id corresponding to the specified pid
         pid_to_global_id,
         SpankItem::JobPidToGlobalId,
         pid,
@@ -686,7 +883,7 @@ impl<'a> SpankHandle<'a> {
         u32
     );
     spank_item_getter!(
-        /// Local task id from pid
+        /// Returns the local task id corresponding to the specified pid
         pid_to_local_id,
         SpankItem::JobPidToLocalId,
         pid,
@@ -694,7 +891,7 @@ impl<'a> SpankHandle<'a> {
         u32
     );
     spank_item_getter!(
-        /// Local id to global id
+        /// Returns the local task id corresponding to the specified global id
         local_to_global_id,
         SpankItem::JobLocalToGlobalId,
         local_id,
@@ -702,7 +899,7 @@ impl<'a> SpankHandle<'a> {
         u32
     );
     spank_item_getter!(
-        /// Global id to local id
+        /// Returns the global task id corresponding to the specified local id
         global_to_local_id,
         SpankItem::JobGlobalToLocalId,
         global_id,
@@ -710,7 +907,7 @@ impl<'a> SpankHandle<'a> {
         u32
     );
 
-    /// Vec of supplementary gids
+    /// Returns the list of supplementary gids for the current job
     pub fn job_supplmentary_gids(&self) -> Result<Vec<gid_t>, SpankError> {
         let mut gidc: c_int = 0;
         let mut gidv: *const gid_t = ptr::null_mut();
@@ -737,75 +934,75 @@ impl<'a> SpankHandle<'a> {
     }
 
     spank_item_getter!(
-        /// Current Slurm version
+        /// Returns the current Slurm version
         slurm_version,
         SpankItem::SlurmVersion,
         &str
     );
 
     spank_item_getter!(
-        /// Slurm version major release
+        /// Returns the major release number of Slurm
         slurm_version_major,
         SpankItem::SlurmVersionMajor,
         &str
     );
     spank_item_getter!(
-        /// Slurm version minor release
+        /// Returns the minor release number of Slurm
         slurm_version_minor,
         SpankItem::SlurmVersionMinor,
         &str
     );
     spank_item_getter!(
-        /// Slurm version micro release
+        /// Returns the micro release number of Slurm
         slurm_version_micro,
         SpankItem::SlurmVersionMicro,
         &str
     );
     spank_item_getter!(
-        /// CPUs allocated per task/ Returns 1 if --overcommit option is used
+        /// Returns the number of CPUs allocated per task. Returns 1 if --overcommit option is used
         step_cpus_per_task,
         SpankItem::StepCpusPerTask,
         u64
     );
 
     spank_item_getter!(
-        /// Job allocated cores in list format
+        /// Returns the list of allocated cores for the job
         job_alloc_cores,
         SpankItem::JobAllocCores,
         &str
     );
     spank_item_getter!(
-        ///Job allocated memory in MB
+        /// Returns the amount of allocated memory for the job in MB
         job_alloc_mem,
         SpankItem::JobAllocMem,
         u64
     );
     spank_item_getter!(
-        /// Step allocated cores in list format
+        /// Returns the list of allocated cores for the step
         step_alloc_cores,
         SpankItem::StepAllocCores,
         &str
     );
     spank_item_getter!(
-        /// Step allocated memory in MB
+        /// Returns the amount of allocated memory for the step in MB
         step_alloc_mem,
         SpankItem::StepAllocMem,
         u64
     );
     spank_item_getter!(
-        /// Job restart count
+        /// Returns the restart count for the job
         slurm_restart_count,
         SpankItem::SlurmRestartCount,
         u32
     );
     spank_item_getter!(
-        /// Slurm job array id
+        /// Returns the job array id
         job_array_id,
         SpankItem::JobArrayId,
         u32
     );
     spank_item_getter!(
-        /// Slurm job array task id
+        /// Returns the job array task id
         job_array_task_id,
         SpankItem::JobArrayTaskId,
         u32
@@ -823,6 +1020,7 @@ fn cstring_escape_null(msg: &str) -> CString {
     CString::new(&c_safe_msg as &str).unwrap()
 }
 
+/// Log level for SPANK logging functions
 pub enum LogLevel {
     Error,
     Info,
@@ -834,6 +1032,7 @@ pub enum LogLevel {
 
 static FORMAT_STRING: [u8; 3] = *b"%s\0";
 
+/// Log messages through SPANK
 pub fn spank_log(level: LogLevel, msg: &str) {
     let c_msg = cstring_escape_null(msg);
     let c_format_string = FORMAT_STRING.as_ptr() as *const i8;
@@ -850,6 +1049,7 @@ pub fn spank_log(level: LogLevel, msg: &str) {
 }
 
 #[macro_export]
+/// Log messages through SPANK at the error level
 macro_rules! spank_log_error {
     ($($arg:tt)*) => ({
         $crate::spank_log($crate::LogLevel::Error,&format!($($arg)*));
@@ -857,6 +1057,7 @@ macro_rules! spank_log_error {
 }
 
 #[macro_export]
+/// Log messages through SPANK at the info level
 macro_rules! spank_log_info {
     ($($arg:tt)*) => ({
         $crate::spank_log($crate::LogLevel::Info, &format!($($arg)*));
@@ -864,6 +1065,7 @@ macro_rules! spank_log_info {
 }
 
 #[macro_export]
+/// Log messages through SPANK at the verboce level
 macro_rules! spank_log_verbose {
     ($($arg:tt)*) => ({
         $crate::spank_log($crate::LogLevel::Verbose, &format!($($arg)*));
@@ -871,6 +1073,7 @@ macro_rules! spank_log_verbose {
 }
 
 #[macro_export]
+/// Log messages through SPANK at the debug level
 macro_rules! spank_log_debug {
     ($($arg:tt)*) => ({
         $crate::spank_log($crate::LogLevel::Debug, &format!($($arg)*));
@@ -878,6 +1081,7 @@ macro_rules! spank_log_debug {
 }
 
 #[macro_export]
+/// Log messages through SPANK at the debug2 level
 macro_rules! spank_log_debug2 {
     ($($arg:tt)*) => ({
         $crate::spank_log($crate::LogLevel::Debug2, &format!($($arg)*));
@@ -885,6 +1089,7 @@ macro_rules! spank_log_debug2 {
 }
 
 #[macro_export]
+/// Log messages through SPANK at the debug3 level
 macro_rules! spank_log_debug3 {
     ($($arg:tt)*) => ({
         $crate::spank_log($crate::LogLevel::Debug3, &format!($($arg)*));
@@ -1026,6 +1231,19 @@ pub fn make_cb_span(id: &str, cb: &str, ctx: &str, task_id: Option<u32>) -> trac
 }
 
 #[macro_export]
+/// Export a Plugin to make it available to the Slurm plugin loader
+///
+/// # Example
+///
+///```rust,no_run
+///SPANK_PLUGIN!(b"renice\0", 0x130502, SpankRenice);
+///```
+///
+/// The first argument is the name of the SPANK plugin. It has to be provided as a null-terminated byte string.
+///
+/// The second argument is the Slurm version for which the plugin is built, specified in hexadecimal (2 digits per version component).
+///
+/// The last argument is a struct for which the Plugin trait has been implemented
 macro_rules! SPANK_PLUGIN {
     ($spank_name:literal, $spank_version:literal, $spank_ty:ty) => {
         const fn byte_string_size<T>(_: &T) -> usize {
@@ -1103,44 +1321,103 @@ macro_rules! SPANK_PLUGIN {
     };
 }
 
+/// Implement this trait to create a SPANK plugin
 #[allow(unused_variables)]
 pub trait Plugin: Send {
+    /// Called just after plugins are loaded.
+    ///
+    /// In remote context, this is just after job step is initialized. This
+    /// function is called before any plugin option processing.
     fn init(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
+
+    /// Called at the same time as the job prolog.
+    ///
+    /// If this function returns an error and the SPANK plugin that contains it
+    /// is required in the plugstack.conf, the node that this is run on will be
+    /// drained.
     fn job_prolog(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
+
+    /// Called at the same point as slurm_spank_init, but after all user options
+    /// to the plugin have been processed.
+    ///
+    /// The reason that the init and init_post_opt callbacks are separated is so
+    /// that plugins can process system-wide options specified in plugstack.conf
+    /// in the init callback, then process user options, and finally take some
+    /// action in slurm_spank_init_post_opt if necessary. In the case of a
+    /// heterogeneous job, slurm_spank_init is invoked once per job component.
     fn init_post_opt(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
+
+    /// Called in local (srun) context only after all options have been
+    /// processed.
+    ///
+    /// This is called after the job ID and step IDs are available. This happens
+    /// in srun after the allocation is made, but before tasks are launched.
     fn local_user_init(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
+
+    /// Called after privileges are temporarily dropped. (remote context only)
     fn user_init(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
+    /// Called for each task just after fork, but before all elevated privileges
+    /// are dropped. (remote context only)
     fn task_init_privileged(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
+
+    /// Called for each task just before execve (2).
+    ///
+    /// If you are restricing memory with cgroups, memory allocated here will be
+    /// in the job's cgroup. (remote context only)
     fn task_init(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
+
+    /// Called for each task from parent process after fork (2) is complete.
+    ///
+    ///  Due to the fact that slurmd does not exec any tasks until all tasks
+    ///  have completed fork (2), this call is guaranteed to run before the user
+    ///  task is executed. (remote context only)
     fn task_post_fork(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
+
+    /// Called for each task as its exit status is collected by Slurm. (remote context only)
     fn task_exit(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
+
+    /// Called at the same time as the job epilog.
+    ///
+    /// If this function returns an error and the SPANK plugin that contains it
+    /// is required in the plugstack.conf, the node that this is run on will be
+    /// drained.
     fn job_epilog(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
+
+    /// Called in slurmd when the daemon is shut down.
     fn slurmd_exit(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
+
+    /// Called once just before slurmstepd exits in remote context. In local
+    /// context, called before srun exits.
     fn exit(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
+
+    /// Called each time an Err Result is returned from a SPANK callback
+    ///
+    /// The default implementation logs errors through SPANK along with their
+    /// causes.
     fn report_error(&self, error: &dyn Error) {
         // TODO: use error iterators once theyre stable
         let mut report = error.to_string();
@@ -1152,6 +1429,9 @@ pub trait Plugin: Send {
         error!("{}", &report);
     }
 
+    /// Called before the first callback from SPANK
+    ///
+    /// The default implementation configures a tracing Subscriber.
     fn setup(&self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         let default_level = match spank.context()? {
             Context::Local => "error",
@@ -1279,6 +1559,7 @@ enum SpankItem {
 
 #[derive(Debug, Copy, Clone, PartialEq, IntoPrimitive, FromPrimitive)]
 #[repr(u32)]
+/// Errors returned by the underlying SPANK API
 pub enum SpankApiError {
     #[num_enum(default)]
     Generic = spank_sys::spank_err_ESPANK_ERROR,
@@ -1311,6 +1592,7 @@ impl fmt::Display for SpankApiError {
 impl Error for SpankError {}
 
 #[derive(Debug, Clone)]
+/// Main Error enum for interfaces provided by this crate
 pub enum SpankError {
     CStringError(String),
     EnvExists(String),
@@ -1377,6 +1659,7 @@ impl fmt::Display for SpankError {
 
 #[derive(Debug, Copy, Clone, PartialEq, IntoPrimitive, TryFromPrimitive)]
 #[repr(u32)]
+/// Context in which a plugin is loaded during a Slurm job
 pub enum Context {
     // We dont represent error here, as errors are better embedded in Results
     Local = spank_sys::spank_context_S_CTX_LOCAL,
@@ -1386,6 +1669,8 @@ pub enum Context {
     JobScript = spank_sys::spank_context_S_CTX_JOB_SCRIPT,
 }
 
+/// SPANK plugin command-line option that can be registered with
+/// SpankHandle::register_option
 pub struct SpankOption {
     name: String,
     arginfo: Option<String>,
