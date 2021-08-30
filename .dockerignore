@@ -1,0 +1,10 @@
+*
+!src/*
+!Cargo.toml
+!Cargo.lock
+!tests/src/*
+!tests/Cargo.toml
+!tests/Cargo.lock
+!wrapper.h
+!docker/*
+!build.rs
