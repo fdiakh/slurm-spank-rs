@@ -1038,7 +1038,6 @@ pub fn spank_log(level: LogLevel, msg: &str) {
     let c_format_string = FORMAT_STRING.as_ptr() as *const i8;
 
     match level {
-        // TODO: no need for c_str dep just for this
         LogLevel::Error => unsafe { spank_sys::slurm_error(c_format_string, c_msg.as_ptr()) },
         LogLevel::Info => unsafe { spank_sys::slurm_info(c_format_string, c_msg.as_ptr()) },
         LogLevel::Verbose => unsafe { spank_sys::slurm_verbose(c_format_string, c_msg.as_ptr()) },
