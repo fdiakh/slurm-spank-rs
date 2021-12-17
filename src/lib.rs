@@ -1433,7 +1433,7 @@ pub trait Plugin: Send {
     /// The default implementation configures a tracing Subscriber.
     fn setup(&self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         let default_level = match spank.context()? {
-            Context::Local => "error",
+            Context::Local | Context::Allocator => "error",
             _ => "debug",
         };
         let filter_layer =
