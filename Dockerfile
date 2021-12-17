@@ -17,10 +17,10 @@ RUN dnf -y module install llvm-toolset
 RUN dnf -y install slurm-devel
 RUN mkdir /build && cd /build && cargo init --lib slurm-spank && find /build/slurm-spank -exec touch -t 200001010000 {} \;
 WORKDIR /build/slurm-spank
-COPY Cargo.toml Cargo.lock  build.rs wrapper.h ./
+COPY Cargo.toml build.rs wrapper.h ./
 RUN cargo init --lib tests
 WORKDIR /build/slurm-spank/tests
-COPY tests/Cargo.toml tests/Cargo.lock ./
+COPY tests/Cargo.toml ./
 RUN cargo build
 RUN find . -exec touch -t  200001010000 {} \;
 
