@@ -210,7 +210,7 @@ use std::sync::Mutex;
 use std::{ptr, slice};
 use tracing::{error, span};
 use tracing_core::{Event, Subscriber};
-use tracing_subscriber::fmt::{layer, FmtContext, FormatEvent, FormatFields, FormattedFields};
+use tracing_subscriber::fmt::{layer, FmtContext, FormatEvent, FormatFields, FormattedFields, format::Writer};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{EnvFilter, Registry};
@@ -1466,7 +1466,7 @@ where
     fn format_event(
         &self,
         ctx: &FmtContext<'_, S, N>,
-        writer: &mut dyn fmt::Write,
+        mut writer: Writer,
         event: &Event<'_>,
     ) -> fmt::Result {
         // Write level
@@ -1503,7 +1503,7 @@ where
 
 struct SpankTraceWriter {}
 
-impl tracing_subscriber::fmt::MakeWriter for SpankTraceWriter {
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SpankTraceWriter {
     type Writer = Self;
 
     fn make_writer(&self) -> Self::Writer {
