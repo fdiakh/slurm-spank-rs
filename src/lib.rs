@@ -210,7 +210,9 @@ use std::sync::Mutex;
 use std::{ptr, slice};
 use tracing::{error, span};
 use tracing_core::{Event, Subscriber};
-use tracing_subscriber::fmt::{layer, FmtContext, FormatEvent, FormatFields, FormattedFields, format::Writer};
+use tracing_subscriber::fmt::{
+    format::Writer, layer, FmtContext, FormatEvent, FormatFields, FormattedFields,
+};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{EnvFilter, Registry};
@@ -286,7 +288,9 @@ fn os_value_to_lossy(value: Cow<'_, OsStr>) -> Cow<'_, str> {
 fn os_value_to_str(value: Cow<'_, OsStr>) -> Result<Cow<'_, str>, SpankError> {
     match value {
         Cow::Borrowed(value) => Ok(Cow::from(
-            value.to_str().ok_or(SpankError::from_os_str(value))?,
+            value
+                .to_str()
+                .ok_or_else(|| SpankError::from_os_str(value))?,
         )),
         Cow::Owned(value) => {
             Ok(Cow::from(value.into_string().map_err(|value_err| {
@@ -321,16 +325,16 @@ impl<'a> SpankHandle<'a> {
     /// valid when called from a plugin's `init()`, and must be guaranteed to be
     /// called in all contexts in which it is used (local, remote, allocator).
     pub fn register_option(&mut self, spank_opt: SpankOption) -> Result<(), SpankError> {
-        let arginfo = match spank_opt.arginfo {
+        let arginfo = match &spank_opt.arginfo {
             None => None,
-            Some(info) => Some(CString::new(&info as &str).or(Err(SpankError::from_str(&info)))?),
+            Some(info) => Some(CString::new(info as &str).map_err(|_| SpankError::from_str(info))?),
         };
-        let name =
-            CString::new(&spank_opt.name as &str).or(Err(SpankError::from_str(&spank_opt.name)))?;
+        let name = CString::new(&spank_opt.name as &str)
+            .map_err(|_| SpankError::from_str(&spank_opt.name))?;
         let usage = match spank_opt.usage {
             None => None,
             Some(usage) => {
-                Some(CString::new(&usage as &str).or(Err(SpankError::from_str(&usage)))?)
+                Some(CString::new(&usage as &str).map_err(|_| SpankError::from_str(&usage))?)
             }
         };
 
@@ -416,7 +420,7 @@ impl<'a> SpankHandle<'a> {
     ///  context, use std::env directly
     pub fn getenv_lossy<N: AsRef<OsStr>>(&self, name: N) -> Result<Option<String>, SpankError> {
         self.do_getenv_os(name, spank_sys::spank_getenv)
-            .and_then(|env| Ok(env.map(|s| s.to_string_lossy().into_owned())))
+            .map(|env| env.map(|s| s.to_string_lossy().into_owned()))
     }
 
     ///  Retrieves the environment variable `name` from the job's environment as
@@ -463,7 +467,7 @@ impl<'a> SpankHandle<'a> {
         name: N,
     ) -> Result<Option<String>, SpankError> {
         self.do_getenv_os(name, spank_sys::spank_job_control_getenv)
-            .and_then(|env| Ok(env.map(|s| s.to_string_lossy().into_owned())))
+            .map(|env| env.map(|s| s.to_string_lossy().into_owned()))
     }
 
     ///  Retrieves the environment variable `name` from the job's control
@@ -494,9 +498,8 @@ impl<'a> SpankHandle<'a> {
         let mut max_size = 4096;
         let c_name = CString::new(name.as_ref().as_bytes())
             .map_err(|_| SpankError::from_str(&name.as_ref().to_string_lossy()))?;
-        let mut buffer = Vec::<c_char>::with_capacity(max_size);
         loop {
-            buffer.resize(max_size, 0);
+            let mut buffer = vec![0; max_size];
             let buffer_ptr = buffer.as_mut_ptr();
             match unsafe {
                 spank_fn(
@@ -662,8 +665,7 @@ impl<'a> SpankHandle<'a> {
     /// they were used or not. To check whether a flag was set, use
     /// is_option_set.
     pub fn get_option_value_lossy(&self, name: &str) -> Option<Cow<'_, str>> {
-        self.get_option_value_os(name)
-            .map(|value| os_value_to_lossy(value))
+        self.get_option_value_os(name).map(os_value_to_lossy)
     }
 
     /// Returns the value set for the option `name` as a String
@@ -703,7 +705,7 @@ impl<'a> SpankHandle<'a> {
             Ok(Context::JobScript) => self
                 .getopt_os(name)
                 .ok() // We made sure call from the correct context
-                .map(|opt| opt.map(|value| Cow::from(value)))
+                .map(|opt| opt.map(Cow::from))
                 .unwrap_or(None),
             _ => {
                 if let Some(Some(ref value)) = self.opt_cache.values.get(name) {
@@ -793,7 +795,7 @@ impl<'a> SpankHandle<'a> {
     /// Returns the job command args as Vec<&OsStr>
     pub fn job_argv_os(&self) -> Result<Vec<&OsStr>, SpankError> {
         self.job_argv_c()
-            .and_then(|(argc, argv)| Ok(self.argv_to_vec_os(argc, argv)))
+            .map(|(argc, argv)| self.argv_to_vec_os(argc, argv))
     }
 
     fn job_argv_c(&self) -> Result<(usize, *const *const c_char), SpankError> {
@@ -826,7 +828,7 @@ impl<'a> SpankHandle<'a> {
     /// Returns the job environment variables as an array of Vec<&OsStr>
     pub fn job_env_os(&self) -> Result<Vec<&OsStr>, SpankError> {
         self.job_env_c()
-            .and_then(|(argc, argv)| Ok(self.argv_to_vec_os(argc, argv)))
+            .map(|(argc, argv)| self.argv_to_vec_os(argc, argv))
     }
 
     fn job_env_c(&self) -> Result<(usize, *const *const c_char), SpankError> {
@@ -924,10 +926,9 @@ impl<'a> SpankHandle<'a> {
                 gidc_ptr,
             )
         } {
-            spank_sys::ESPANK_SUCCESS => Ok(unsafe { slice::from_raw_parts(gidv, gidc as usize) }
-                .iter()
-                .map(|&gid| gid)
-                .collect::<Vec<gid_t>>()),
+            spank_sys::ESPANK_SUCCESS => {
+                Ok(unsafe { slice::from_raw_parts(gidv, gidc as usize) }.to_vec())
+            }
             e => Err(SpankError::from_spank("spank_get_item", e)),
         }
     }
@@ -1152,7 +1153,7 @@ where
                 .downcast::<&str>()
                 .map(|b| b.to_string())
                 .or_else(|panic| panic.downcast::<String>().map(|s| *s))
-                .unwrap_or("non-string panic".to_string());
+                .unwrap_or_else(|_| "non-string panic".to_string());
 
             spank_log_error!(
                 "Caught panic while running spank callback: {}",
@@ -1177,7 +1178,7 @@ extern "C" fn spank_option_callback(
         .try_lock()
         .expect("Failed to acquire global options mutex");
 
-    let name = opt_cache.options.get(val as usize).map(|name| name.clone());
+    let name = opt_cache.options.get(val as usize).cloned();
 
     let name = match name {
         None => {
@@ -1194,7 +1195,7 @@ extern "C" fn spank_option_callback(
     };
 
     let optarg = {
-        if optarg == std::ptr::null() {
+        if optarg.is_null() {
             None
         } else {
             Some(
@@ -1211,12 +1212,12 @@ extern "C" fn spank_option_callback(
 #[doc(hidden)]
 // This function only public so that it may be called from the callbacks
 // generated by the macro. It should not be called to create handles manually.
-pub fn init_spank_handle<'a>(
+pub fn init_spank_handle(
     spank: spank_sys::spank_t,
     argc: c_int,
     argv: *const *const c_char,
-    opt_cache: &'a mut OptionCache,
-) -> SpankHandle<'a> {
+    opt_cache: &mut OptionCache,
+) -> SpankHandle {
     SpankHandle {
         spank,
         argc,
@@ -1448,7 +1449,7 @@ pub trait Plugin: Send {
         let fmt_layer = layer()
             .event_format(SpankTraceFormatter {})
             .with_writer(SpankTraceWriter {});
-        let filter_layer = Registry::default()
+        Registry::default()
             .with(filter_layer)
             .with(fmt_layer)
             .init();
@@ -1563,7 +1564,7 @@ enum SpankItem {
     JobArrayTaskId = spank_sys::spank_item_S_JOB_ARRAY_TASK_ID,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, IntoPrimitive, FromPrimitive)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, IntoPrimitive, FromPrimitive)]
 #[repr(u32)]
 /// Errors returned by the underlying SPANK API
 pub enum SpankApiError {
@@ -1663,7 +1664,7 @@ impl fmt::Display for SpankError {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, IntoPrimitive, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, IntoPrimitive, TryFromPrimitive)]
 #[repr(u32)]
 /// Context in which a plugin is loaded during a Slurm job
 pub enum Context {
