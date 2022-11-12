@@ -236,8 +236,8 @@ macro_rules! spank_item_getter {
             match unsafe {
                 spank_sys::spank_get_item(self.spank, $spank_item.into(), $arg_name, res_ptr)
             } {
-                spank_sys::spank_err_ESPANK_SUCCESS => Ok(res),
-                spank_sys::spank_err_ESPANK_NOEXIST => Err(SpankError::from_noexist($arg_name)),
+                spank_sys::ESPANK_SUCCESS => Ok(res),
+                spank_sys::slurm_err_t_ESPANK_NOEXIST => Err(SpankError::from_noexist($arg_name)),
                 e => Err(SpankError::from_spank_item("spank_get_item", $spank_item, e)),
             }
         }
@@ -248,7 +248,7 @@ macro_rules! spank_item_getter {
             let mut res: *const c_char = ptr::null_mut();
             let res_ptr: *mut *const c_char = &mut res;
             match unsafe { spank_sys::spank_get_item(self.spank, $spank_item.into(), res_ptr) } {
-                spank_sys::spank_err_ESPANK_SUCCESS => {
+                spank_sys::ESPANK_SUCCESS => {
                     if res.is_null() {
                         panic!("Received unexpected null pointer from spank_get_item")
                     } else {
@@ -267,7 +267,7 @@ macro_rules! spank_item_getter {
             let mut res: $result_type = <$result_type>::default();
             let res_ptr: *mut $result_type = &mut res;
             match unsafe { spank_sys::spank_get_item(self.spank, $spank_item.into(), res_ptr) } {
-                spank_sys::spank_err_ESPANK_SUCCESS => Ok(res),
+                spank_sys::ESPANK_SUCCESS => Ok(res),
                 e => Err(SpankError::from_spank_item("spank_get_item", $spank_item, e)),
             }
         }
@@ -312,8 +312,9 @@ impl<'a> SpankHandle<'a> {
     /// Returns the context in which the calling plugin is loaded.
     pub fn context(&self) -> Result<Context, SpankError> {
         let ctx = unsafe { spank_sys::spank_context() };
-        Context::try_from(ctx)
-            .map_err(|_| SpankError::from_spank("spank_context", spank_sys::spank_err_ESPANK_ERROR))
+        Context::try_from(ctx).map_err(|_| {
+            SpankError::from_spank("spank_context", spank_sys::slurm_err_t_ESPANK_ERROR)
+        })
     }
 
     /// Registers a plugin-provided option dynamically. This function is only
@@ -354,7 +355,7 @@ impl<'a> SpankHandle<'a> {
         };
 
         match unsafe { spank_sys::spank_option_register(self.spank, &mut c_spank_opt) } {
-            spank_sys::spank_err_ESPANK_SUCCESS => {
+            spank_sys::ESPANK_SUCCESS => {
                 self.opt_cache.options.push(spank_opt.name);
                 Ok(())
             }
@@ -505,12 +506,12 @@ impl<'a> SpankHandle<'a> {
                     max_size as i32,
                 )
             } {
-                spank_sys::spank_err_ESPANK_ENV_NOEXIST => return Ok(None),
-                spank_sys::spank_err_ESPANK_SUCCESS => {
+                spank_sys::slurm_err_t_ESPANK_ENV_NOEXIST => return Ok(None),
+                spank_sys::ESPANK_SUCCESS => {
                     let cstr = unsafe { CStr::from_ptr(buffer_ptr) };
                     return Ok(Some(OsStr::from_bytes(cstr.to_bytes()).to_os_string()));
                 }
-                spank_sys::spank_err_ESPANK_NOSPACE => {
+                spank_sys::slurm_err_t_ESPANK_NOSPACE => {
                     max_size *= 2;
                     continue;
                 }
@@ -574,8 +575,8 @@ impl<'a> SpankHandle<'a> {
                 overwrite as c_int,
             )
         } {
-            spank_sys::spank_err_ESPANK_SUCCESS => Ok(()),
-            spank_sys::spank_err_ESPANK_ENV_EXISTS => Err(SpankError::EnvExists(
+            spank_sys::ESPANK_SUCCESS => Ok(()),
+            spank_sys::slurm_err_t_ESPANK_ENV_EXISTS => Err(SpankError::EnvExists(
                 name.as_ref().to_string_lossy().to_string(),
             )),
             e => Err(SpankError::from_spank("spank_setenv", e)),
@@ -610,7 +611,7 @@ impl<'a> SpankHandle<'a> {
             .map_err(|_| SpankError::from_os_str(name.as_ref()))?;
 
         match unsafe { spank_fn(self.spank, c_name.as_ptr()) } {
-            spank_sys::spank_err_ESPANK_SUCCESS => Ok(()),
+            spank_sys::ESPANK_SUCCESS => Ok(()),
             e => Err(SpankError::from_spank("spank_unsetenv", e)),
         }
     }
@@ -634,7 +635,7 @@ impl<'a> SpankHandle<'a> {
         let mut optarg: *mut c_char = ptr::null_mut();
 
         match unsafe { spank_sys::spank_option_getopt(self.spank, &mut c_spank_opt, &mut optarg) } {
-            spank_sys::spank_err_ESPANK_SUCCESS => {
+            spank_sys::ESPANK_SUCCESS => {
                 if !optarg.is_null() {
                     Ok(Some(
                         OsStr::from_bytes(unsafe { CStr::from_ptr(optarg) }.to_bytes())
@@ -805,7 +806,7 @@ impl<'a> SpankHandle<'a> {
         match unsafe {
             spank_sys::spank_get_item(self.spank, SpankItem::JobArgv.into(), argc_ptr, argv_ptr)
         } {
-            spank_sys::spank_err_ESPANK_SUCCESS => {
+            spank_sys::ESPANK_SUCCESS => {
                 if argv.is_null() {
                     panic!("spank_get_item returned unexpected NULL ptr");
                 }
@@ -833,7 +834,7 @@ impl<'a> SpankHandle<'a> {
 
         match unsafe { spank_sys::spank_get_item(self.spank, SpankItem::JobEnv.into(), &mut envv) }
         {
-            spank_sys::spank_err_ESPANK_SUCCESS => {
+            spank_sys::ESPANK_SUCCESS => {
                 if envv.is_null() {
                     panic!("spank_get_item returned unexpected NULL ptr")
                 }
@@ -923,12 +924,10 @@ impl<'a> SpankHandle<'a> {
                 gidc_ptr,
             )
         } {
-            spank_sys::spank_err_ESPANK_SUCCESS => {
-                Ok(unsafe { slice::from_raw_parts(gidv, gidc as usize) }
-                    .iter()
-                    .map(|&gid| gid)
-                    .collect::<Vec<gid_t>>())
-            }
+            spank_sys::ESPANK_SUCCESS => Ok(unsafe { slice::from_raw_parts(gidv, gidc as usize) }
+                .iter()
+                .map(|&gid| gid)
+                .collect::<Vec<gid_t>>()),
             e => Err(SpankError::from_spank("spank_get_item", e)),
         }
     }
@@ -1092,6 +1091,14 @@ macro_rules! spank_log_debug2 {
 macro_rules! spank_log_debug3 {
     ($($arg:tt)*) => ({
         $crate::spank_log($crate::LogLevel::Debug3, &format!($($arg)*));
+    })
+}
+
+#[macro_export]
+/// Log messages back to the user at the error level without prepending "error:"
+macro_rules! spank_log_user {
+    ($($arg:tt)*) => ({
+        $crate::slurm_spank_log(&format!($($arg)*));
     })
 }
 
@@ -1561,17 +1568,17 @@ enum SpankItem {
 /// Errors returned by the underlying SPANK API
 pub enum SpankApiError {
     #[num_enum(default)]
-    Generic = spank_sys::spank_err_ESPANK_ERROR,
-    BadArg = spank_sys::spank_err_ESPANK_BAD_ARG,
-    NotTask = spank_sys::spank_err_ESPANK_NOT_TASK,
-    EnvExists = spank_sys::spank_err_ESPANK_ENV_EXISTS,
-    EnvNotExist = spank_sys::spank_err_ESPANK_ENV_NOEXIST,
-    NoSpace = spank_sys::spank_err_ESPANK_NOSPACE,
-    NotRemote = spank_sys::spank_err_ESPANK_NOT_REMOTE,
-    NoExist = spank_sys::spank_err_ESPANK_NOEXIST,
-    NotExecd = spank_sys::spank_err_ESPANK_NOT_EXECD,
-    NotAvail = spank_sys::spank_err_ESPANK_NOT_AVAIL,
-    NotLocal = spank_sys::spank_err_ESPANK_NOT_LOCAL,
+    Generic = spank_sys::slurm_err_t_ESPANK_ERROR,
+    BadArg = spank_sys::slurm_err_t_ESPANK_BAD_ARG,
+    NotTask = spank_sys::slurm_err_t_ESPANK_NOT_TASK,
+    EnvExists = spank_sys::slurm_err_t_ESPANK_ENV_EXISTS,
+    EnvNotExist = spank_sys::slurm_err_t_ESPANK_ENV_NOEXIST,
+    NoSpace = spank_sys::slurm_err_t_ESPANK_NOSPACE,
+    NotRemote = spank_sys::slurm_err_t_ESPANK_NOT_REMOTE,
+    NoExist = spank_sys::slurm_err_t_ESPANK_NOEXIST,
+    NotExecd = spank_sys::slurm_err_t_ESPANK_NOT_EXECD,
+    NotAvail = spank_sys::slurm_err_t_ESPANK_NOT_AVAIL,
+    NotLocal = spank_sys::slurm_err_t_ESPANK_NOT_LOCAL,
 }
 
 impl Error for SpankApiError {}
