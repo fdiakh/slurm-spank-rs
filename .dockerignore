@@ -2,9 +2,9 @@
 !src/*
 !Cargo.toml
 !Cargo.lock
-!tests/src/*
-!tests/Cargo.toml
-!tests/Cargo.lock
+!test/src/*
+!test/Cargo.toml
+!test/Cargo.lock
 !wrapper.h
 !docker/*
 !build.rs

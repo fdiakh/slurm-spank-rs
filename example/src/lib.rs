@@ -11,7 +11,7 @@ const PRIO_ENV_VAR: &str = "SLURM_RENICE";
 
 // All spank plugins must define this macro for the
 // Slurm plugin loader.
-SPANK_PLUGIN!(b"renice\0", 0x130502, SpankRenice);
+SPANK_PLUGIN!(b"renice\0", 0x160502, SpankRenice);
 
 struct SpankRenice {
     min_prio: i32,
@@ -33,19 +33,24 @@ impl Default for SpankRenice {
 
 impl Plugin for SpankRenice {
     fn init(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
-        // Don't do anything in sbatch/salloc
+        if spank.context()? == Context::Slurmd {
+            error!("Plugin init: {l}", l = spank.plugin_argv()?.len());
+        }
+        // Don't do anything in slurmd/sbatch/salloc
         if spank.context()? == Context::Allocator {
             return Ok(());
         }
-
-        // Parse plugin configuration file
-        for arg in spank.plugin_argv().wrap_err("Invalid plugin argument")? {
-            match arg.strip_prefix("min_prio=") {
-                Some(value) => self.min_prio = parse_prio(value).wrap_err("Invalid min_prio")?,
-                None => return Err(eyre!("Invalid plugin argument: {}", arg).into()),
+        if spank.context()? == Context::Remote {
+            // Parse plugin configuration file
+            for arg in spank.plugin_argv().wrap_err("Invalid plugin argument")? {
+                match arg.strip_prefix("min_prio=") {
+                    Some(value) => {
+                        self.min_prio = parse_prio(value).wrap_err("Invalid min_prio")?
+                    }
+                    None => return Err(eyre!("Invalid plugin argument: {}", arg).into()),
+                }
             }
         }
-
         // Provide a --renice=prio option to srun
         spank
             .register_option(

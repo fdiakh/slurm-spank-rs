@@ -911,7 +911,7 @@ impl<'a> SpankHandle<'a> {
     );
 
     /// Returns the list of supplementary gids for the current job
-    pub fn job_supplmentary_gids(&self) -> Result<Vec<gid_t>, SpankError> {
+    pub fn job_supplementary_gids(&self) -> Result<Vec<gid_t>, SpankError> {
         let mut gidc: c_int = 0;
         let mut gidv: *const gid_t = ptr::null_mut();
 
