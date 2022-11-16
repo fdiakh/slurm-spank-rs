@@ -1047,6 +1047,12 @@ pub fn spank_log(level: LogLevel, msg: &str) {
     }
 }
 
+pub fn slurm_spank_log(msg: &str) {
+    let c_msg = cstring_escape_null(msg);
+    let c_format_string = FORMAT_STRING.as_ptr() as *const i8;
+    unsafe { spank_sys::slurm_spank_log(c_format_string, c_msg.as_ptr()) }
+}
+
 #[macro_export]
 /// Log messages through SPANK at the error level
 macro_rules! spank_log_error {
