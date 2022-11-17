@@ -11,7 +11,7 @@ const PRIO_ENV_VAR: &str = "SLURM_RENICE";
 
 // All spank plugins must define this macro for the
 // Slurm plugin loader.
-SPANK_PLUGIN!(b"renice\0", 0x160502, SpankRenice);
+SPANK_PLUGIN!(b"renice", 0x160502, SpankRenice);
 
 struct SpankRenice {
     min_prio: i32,

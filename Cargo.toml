@@ -8,6 +8,7 @@ edition = "2018"
 name = "slurm_spank"
 
 [dependencies]
+byte-strings = "0.2.2"
 lazy_static = "1.4.0"
 libc = "0.2.137"
 num_enum = "0.5.7"

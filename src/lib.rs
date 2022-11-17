@@ -219,6 +219,8 @@ use tracing_subscriber::{EnvFilter, Registry};
 
 #[doc(hidden)]
 pub mod spank_sys;
+#[doc(hidden)]
+pub use byte_strings;
 
 /// Handle to the Slurm interface exposed to SPANK plugins. It provides methods
 /// to query Slurm from a plugin.
@@ -1249,10 +1251,10 @@ pub fn make_cb_span(id: &str, cb: &str, ctx: &str, task_id: Option<u32>) -> trac
 /// # Example
 ///
 ///```rust,no_run
-///SPANK_PLUGIN!(b"renice\0", 0x130502, SpankRenice);
+///SPANK_PLUGIN!(b"renice", 0x130502, SpankRenice);
 ///```
 ///
-/// The first argument is the name of the SPANK plugin. It has to be provided as a null-terminated byte string.
+/// The first argument is the name of the SPANK plugin. It has to be provided as a byte string.
 ///
 /// The second argument is the Slurm version for which the plugin is built, specified in hexadecimal (2 digits per version component).
 ///
@@ -1263,7 +1265,8 @@ macro_rules! SPANK_PLUGIN {
             std::mem::size_of::<T>()
         }
         #[no_mangle]
-        pub static plugin_name: [u8; byte_string_size($spank_name)] = *$spank_name;
+        pub static plugin_name: [u8; byte_string_size($spank_name) + 1] =
+            *$crate::byte_strings::concat_bytes!($spank_name, "\0");
         #[no_mangle]
         pub static mut plugin_type: [u8; 6] = *b"spank\0";
         #[no_mangle]

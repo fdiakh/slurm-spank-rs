@@ -8,7 +8,7 @@ edition = "2018"
 crate-type = ["cdylib"]
 
 [dependencies]
-eyre = "0.6.5"
-libc = "0.2.99"
+eyre = "0.6.8"
+libc = "0.2.137"
 slurm-spank = { path = ".."}
-tracing = "0.1.26"
+tracing = "0.1.37"
