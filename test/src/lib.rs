@@ -2,9 +2,9 @@ use eyre::eyre;
 use slurm_spank::{spank_log_user, Context, Plugin, SpankHandle, SpankOption, SPANK_PLUGIN};
 use std::convert::TryFrom;
 use std::error::Error;
-use tracing::error;
+use tracing::info;
 
-SPANK_PLUGIN!(b"tests\0", 0x160502, SpankTest);
+SPANK_PLUGIN!(b"tests", 0x160502, SpankTest);
 
 #[derive(Default)]
 struct SpankTest {}
@@ -21,33 +21,54 @@ impl Plugin for SpankTest {
 
         spank.register_option(SpankOption::new("test").takes_value("test").usage(usage))?;
 
-        if context != Context::Slurmd {
-            error!("Plugin arguments {}", spank.plugin_argv()?.join(","));
+        if context == Context::Slurmd {
+            info!("Plugin arguments {}", spank.plugin_argv()?.join(","));
         }
 
         // Check that we return None in invalid contexts
         assert!(spank.get_option_value("test")?.is_none());
+
         Ok(())
     }
     fn init_post_opt(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
+        let context = spank.context()?;
         let Some(test) = spank.get_option_value("test")? else {
             return Ok(());
         };
 
-        spank_log_user!("{:?}: selected test: {test}", spank.context()?);
+        spank_log_user!("{:?}: selected test: {test}", context);
 
         if test == "client-error"
-            && (spank.context()? == slurm_spank::Context::Local
-                || spank.context()? == slurm_spank::Context::Allocator)
+            && (context == slurm_spank::Context::Local
+                || context == slurm_spank::Context::Allocator)
         {
             return Err(eyre!("Expected an error").into());
         }
 
-        if test == "remote-error" && (spank.context()? == slurm_spank::Context::Remote) {
+        if test == "remote-error" && (context == slurm_spank::Context::Remote) {
             return Err(eyre!("Expected an error").into());
         }
 
-        if test == "values" && spank.context()? == slurm_spank::Context::Remote {
+        if test == "client-env" && (context == slurm_spank::Context::Remote) {
+            assert!(spank.getenv("NON_EXISTING_VAR")?.is_none());
+            spank_log_user!(
+                "Env value 1: {}",
+                spank.getenv("EXISTING_VAR1")?.expect("Var should exist"),
+            );
+            spank_log_user!(
+                "Env value 2: {}",
+                spank.getenv("EXISTING_VAR2")?.expect("Var should exist"),
+            );
+            spank.setenv("NEW_VALUE", "New value", false)?;
+            assert!(spank
+                .setenv("EXISTING_VAR1", "Not modified", false)
+                .is_err());
+            spank.setenv("EXISTING_VAR2", "Modified value", true)?;
+        }
+        if test == "job-control" && context == slurm_spank::Context::Local {
+            spank.job_control_setenv("FROM_LOCAL", "42", true)?;
+        }
+        if test == "values" && context == slurm_spank::Context::Remote {
             spank_log_user!("spank_remote_job_id: {}", spank.job_id()?);
             spank_log_user!("spank_remote_job_ncpus: {}", spank.job_ncpus()?);
             spank_log_user!("spank_remote_job_nnodes: {}", spank.job_nnodes()?);
@@ -118,11 +139,26 @@ impl Plugin for SpankTest {
         Ok(())
     }
 
-    fn job_prolog(&mut self, _spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
+    fn job_prolog(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
+        let Some(test) = spank.get_option_value("test")? else {
+            return Ok(());
+        };
+
+        if test == "job-control" && spank.context()? == slurm_spank::Context::Local {
+            assert_eq!(std::env::var("SLURM_SPANK_FROM_LOCAL")?, "42");
+        }
+
         Ok(())
     }
 
-    fn local_user_init(&mut self, _spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
+    fn local_user_init(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
+        let Some(test) = spank.get_option_value("test")? else {
+            return Ok(());
+        };
+        if test == "job-control" {
+            assert_eq!(spank.job_control_getenv("FROM_LOCAL")?.unwrap(), "42");
+            spank_log_user!("Job control from local ok");
+        }
         Ok(())
     }
 
@@ -134,7 +170,14 @@ impl Plugin for SpankTest {
         Ok(())
     }
 
-    fn task_init(&mut self, _spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
+    fn task_init(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
+        let Some(test) = spank.get_option_value("test")? else {
+            return Ok(());
+        };
+        if test == "task-error" {
+            return Err(eyre!("Expected an error").into());
+        }
+
         Ok(())
     }
 
