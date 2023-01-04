@@ -9,7 +9,7 @@ SPANK_PLUGIN!(b"tests", 0x160502, SpankTest);
 #[derive(Default)]
 struct SpankTest {}
 
-impl Plugin for SpankTest {
+unsafe impl Plugin for SpankTest {
     fn init(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         let context = spank.context()?;
 

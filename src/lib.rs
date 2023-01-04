@@ -1312,10 +1312,12 @@ macro_rules! SPANK_PLUGIN {
                             );
                             let _guard = span.enter();
 
-                            plugin.$rust_spank_cb(&mut spank).map_err(|e| {
-                                plugin.report_error(e.as_ref());
-                                e
-                            })
+                            unsafe {
+                                plugin.$rust_spank_cb(&mut spank).map_err(|e| {
+                                    plugin.report_error(e.as_ref());
+                                    e
+                                })
+                            }
                         },
                     )
                 }
@@ -1338,8 +1340,11 @@ macro_rules! SPANK_PLUGIN {
 }
 
 /// Implement this trait to create a SPANK plugin
+/// # Safety
+/// The task callbacks (task_init, task_init_privileged, ...) are called from child processes which slurmstepd creates by forking itself.
+/// This may lead to deadlocks or other issues if the Rust plugin is multi-threaded (see https://man7.org/linux/man-pages/man7/signal-safety.7.html)
 #[allow(unused_variables)]
-pub trait Plugin: Send {
+pub unsafe trait Plugin: Send {
     /// Called just after plugins are loaded.
     ///
     /// In remote context, this is just after job step is initialized. This
