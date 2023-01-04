@@ -31,7 +31,7 @@ impl Default for SpankRenice {
     }
 }
 
-impl Plugin for SpankRenice {
+unsafe impl Plugin for SpankRenice {
     fn init(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         if spank.context()? == Context::Slurmd {
             error!("Plugin init: {l}", l = spank.plugin_argv()?.len());

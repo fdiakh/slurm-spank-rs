@@ -1,4 +1,7 @@
 /target
 Cargo.lock
-example/target
+example/hello/target
+example/hello/Cargo.lock
+example/renice/target
+example/renice/Cargo.lock
 test/target

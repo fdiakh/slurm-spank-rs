@@ -10,5 +10,5 @@ crate-type = ["cdylib"]
 [dependencies]
 eyre = "0.6.8"
 libc = "0.2.137"
-slurm-spank = { path = ".."}
+slurm-spank = { path = "../.."}
 tracing = "0.1.37"
