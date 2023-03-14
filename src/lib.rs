@@ -705,7 +705,7 @@ impl<'a> SpankHandle<'a> {
                     panic!("spank_get_item returned unexpected NULL ptr")
                 }
                 let mut argc: isize = 0;
-                while !unsafe { *envv.offset(argc as isize) }.is_null() {
+                while !unsafe { *envv.offset(argc) }.is_null() {
                     argc += 1;
                 }
                 Ok((argc as usize, envv))
