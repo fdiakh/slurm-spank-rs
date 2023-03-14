@@ -1,13 +1,13 @@
 [package]
 name = "slurm-spank"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Francois Diakhate <fdiakh@gmail.com>"]
 edition = "2018"
 license = "MIT OR Apache-2.0"
 description = "Safe Rust bindings to the Slurm SPANK API"
 repository = "https://github.com/fdiakh/slurm-spank-rs"
 readme = "README.md"
-documentation = "https://docs.rs/slurm-spank-rs"
+keywords = [ "Slurm", "SPANK", "plugin", "HPC", "cluster" ]
 
 [lib]
 name = "slurm_spank"
