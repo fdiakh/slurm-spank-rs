@@ -41,7 +41,7 @@
 //!how to implement the same renice plugin that is given as an example of the C
 //!SPANK API in the Slurm [`SPANK documentation`].
 //!```rust,no_run
-#![doc = include_str!("../example/hello/src/lib.rs")]
+#![doc = include_str!("hello.md")]
 //! ```
 //! The following Cargo.toml can be used to build this example plugin
 //!```toml
