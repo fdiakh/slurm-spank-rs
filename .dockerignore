@@ -8,3 +8,6 @@
 !wrapper.h
 !docker/*
 !build.rs
+!example/hello/src/*
+!example/hello/Cargo.toml
+!example/hello/Cargo.lock

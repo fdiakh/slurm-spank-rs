@@ -12,6 +12,7 @@ RUN echo 0000000000000000000000000000000000000 > /etc/munge/munge.key && \
 
 # Easier to run non-privileged without cgroups
 RUN sed -i 's!proctrack/cgroup!proctrack/pgid!' /etc/slurm/slurm.conf
+RUN echo IgnoreSystemd=yes >> /etc/slurm/cgroup.conf
 
 # Rust toolset
 RUN dnf -y install rust cargo
@@ -29,6 +30,7 @@ RUN cargo build
 RUN find . -exec touch -t  200001010000 {} \;
 
 # Copy sources
+COPY example /build/slurm-spank/example
 COPY src /build/slurm-spank/src
 COPY test/src /build/slurm-spank/test_plugin/src
 
