@@ -902,7 +902,7 @@ static FORMAT_STRING: [u8; 3] = *b"%s\0";
 /// Log messages through SPANK
 pub fn spank_log(level: LogLevel, msg: &str) {
     let c_msg = cstring_escape_null(msg);
-    let c_format_string = FORMAT_STRING.as_ptr() as *const i8;
+    let c_format_string = FORMAT_STRING.as_ptr() as *const c_char;
 
     match level {
         LogLevel::Error => unsafe { spank_sys::slurm_error(c_format_string, c_msg.as_ptr()) },
@@ -916,7 +916,7 @@ pub fn spank_log(level: LogLevel, msg: &str) {
 
 pub fn slurm_spank_log(msg: &str) {
     let c_msg = cstring_escape_null(msg);
-    let c_format_string = FORMAT_STRING.as_ptr() as *const i8;
+    let c_format_string = FORMAT_STRING.as_ptr() as *const c_char;
     unsafe { spank_sys::slurm_spank_log(c_format_string, c_msg.as_ptr()) }
 }
 
@@ -1396,7 +1396,9 @@ impl std::io::Write for SpankTraceWriter {
         let c_string = CString::new(buf)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
 
-        unsafe { spank_sys::slurm_info(FORMAT_STRING.as_ptr() as *const i8, c_string.as_ptr()) };
+        unsafe {
+            spank_sys::slurm_info(FORMAT_STRING.as_ptr() as *const c_char, c_string.as_ptr())
+        };
 
         Ok(buf.len())
     }
