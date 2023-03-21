@@ -50,6 +50,9 @@
 //! version = "0.1.0"
 //! edition = "2021"
 //!
+//! [lib]
+//! crate-type = ["cdylib"]
+//!
 //! [dependencies]
 //! eyre = "0.6.8"
 //! slurm-spank = "0.2"
