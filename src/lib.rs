@@ -1326,6 +1326,7 @@ pub unsafe trait Plugin: Send {
         let filter_layer =
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
         let fmt_layer = layer()
+            .with_ansi(false)
             .event_format(SpankTraceFormatter {})
             .with_writer(SpankTraceWriter {});
         Registry::default()
