@@ -63,7 +63,7 @@ unsafe impl Plugin for SpankRenice {
         Ok(())
     }
     fn init_post_opt(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
-        // Skip argument processing outside of relevent contexts
+        // Skip argument processing outside of relevant contexts
         match spank.context()? {
             Context::Local | Context::Remote => (),
             _ => return Ok(()),

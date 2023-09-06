@@ -13,7 +13,7 @@
 //!The methods of the Plugin trait correspond to the callbacks defined by the
 //!SPANK API such as [`init_post_opt`], [`task_post_fork`] etc. These methods
 //!have a default implementation which means you only need to implement the
-//!callbacks relevent for your plugin.
+//!callbacks relevant for your plugin.
 //!
 //! [`init_post_opt`]: crate::Plugin::init_post_opt
 //!
