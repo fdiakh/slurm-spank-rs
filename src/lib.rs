@@ -1260,7 +1260,7 @@ pub unsafe trait Plugin: Send {
 
     /// Called for each task just before execve (2).
     ///
-    /// If you are restricing memory with cgroups, memory allocated here will be
+    /// If you are restricting memory with cgroups, memory allocated here will be
     /// in the job's cgroup. (remote context only)
     fn task_init(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         Ok(())
