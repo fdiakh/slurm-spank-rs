@@ -24,10 +24,10 @@
 //!
 //!When returning an [`Err`] from a callback an error message will be displayed
 //!and/or logged by default, depending on the context. This behaviour may be
-//!overriden by the [`report_error`] method. A default [`Subscriber`] is also
+//!overridden by the [`report_error`] method. A default [`Subscriber`] is also
 //!configured to facilitate the use of the [`tracing`] crate for logging and
 //!error reporting while using SPANK log facilities, such as in the exemple
-//!below. This can be overriden by the [`setup`] method.
+//!below. This can be overridden by the [`setup`] method.
 //!
 //! [`report_error`]: crate::Plugin::report_error
 //!
