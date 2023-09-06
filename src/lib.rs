@@ -26,7 +26,7 @@
 //!and/or logged by default, depending on the context. This behaviour may be
 //!overridden by the [`report_error`] method. A default [`Subscriber`] is also
 //!configured to facilitate the use of the [`tracing`] crate for logging and
-//!error reporting while using SPANK log facilities, such as in the exemple
+//!error reporting while using SPANK log facilities, such as in the example
 //!below. This can be overridden by the [`setup`] method.
 //!
 //! [`report_error`]: crate::Plugin::report_error
