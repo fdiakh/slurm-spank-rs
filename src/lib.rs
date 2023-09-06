@@ -283,7 +283,7 @@ impl<'a> SpankHandle<'a> {
     ///  If the value contains invalid UTF-8 code points, those invalid points
     ///  will be replaced with � (U+FFFD). This function returns Ok(none) if the
     ///  environment variable is not set. It returns an error if called outside
-    ///  of remote conext. To access job environment variables from local
+    ///  of remote context. To access job environment variables from local
     ///  context, use std::env directly
     pub fn getenv_lossy<N: AsRef<OsStr>>(&self, name: N) -> Result<Option<String>, SpankError> {
         self.do_getenv_os(name, spank_sys::spank_getenv)
@@ -296,7 +296,7 @@ impl<'a> SpankHandle<'a> {
     ///  The return value is an OsString which can hold arbitrary sequences of
     ///  bytes on Unix-like systems. This function returns Ok(none) if the
     ///  environment variable is not set. It returns an error if called outside
-    ///  of remote conext. To access job environment variables from local
+    ///  of remote context. To access job environment variables from local
     ///  context, use std::env directly
     pub fn getenv_os<N: AsRef<OsStr>>(&self, name: N) -> Result<Option<OsString>, SpankError> {
         self.do_getenv_os(name, spank_sys::spank_getenv)
