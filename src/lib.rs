@@ -1305,7 +1305,7 @@ pub unsafe trait Plugin: Send {
     /// The default implementation logs errors through SPANK along with their
     /// causes.
     fn report_error(&self, error: &dyn Error) {
-        // TODO: use error iterators once theyre stable
+        // TODO: use error iterators once they're stable
         let mut report = error.to_string();
         let mut error = error;
         while let Some(source) = error.source() {
