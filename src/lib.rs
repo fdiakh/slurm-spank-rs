@@ -937,7 +937,7 @@ macro_rules! spank_log_info {
 }
 
 #[macro_export]
-/// Log messages through SPANK at the verboce level
+/// Log messages through SPANK at the verbose level
 macro_rules! spank_log_verbose {
     ($($arg:tt)*) => ({
         $crate::spank_log($crate::LogLevel::Verbose, &format!($($arg)*));
