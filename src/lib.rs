@@ -681,7 +681,7 @@ impl<'a> SpankHandle<'a> {
                 }
                 Ok((argc as usize, argv))
             }
-            e => Err(SpankError::from_spank("sapnk_get_item", e)),
+            e => Err(SpankError::from_spank("spank_get_item", e)),
         }
     }
 
