@@ -590,7 +590,7 @@ impl<'a> SpankHandle<'a> {
     ///
     /// *WARNING*: If options have not yet been processed (e.g in init callbacks
     /// or all slurmd contexts), this function will always return false.
-    pub fn is_option_set(&mut self, name: &str) -> bool {
+    pub fn is_option_set(&self, name: &str) -> bool {
         match self.context() {
             Ok(Context::JobScript) => self.getopt_os(name).is_ok(),
             _ => self.opt_cache.values.get(name).is_some(),
