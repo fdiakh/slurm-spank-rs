@@ -1,12 +1,14 @@
 use eyre::WrapErr;
-use slurm_spank::{spank_log_user, Context, Plugin, SpankHandle, SpankOption, SPANK_PLUGIN};
+use slurm_spank::{
+    spank_log_user, Context, Plugin, SpankHandle, SpankOption, SLURM_VERSION_NUMBER, SPANK_PLUGIN,
+};
 
 use std::error::Error;
 use tracing::info;
 
 // All spank plugins must define this macro for the
 // Slurm plugin loader.
-SPANK_PLUGIN!(b"hello", 0x160502, SpankHello);
+SPANK_PLUGIN!(b"hello", SLURM_VERSION_NUMBER, SpankHello);
 
 #[derive(Default)]
 struct SpankHello {

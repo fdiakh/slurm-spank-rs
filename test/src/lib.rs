@@ -1,10 +1,12 @@
 use eyre::eyre;
-use slurm_spank::{spank_log_user, Context, Plugin, SpankHandle, SpankOption, SPANK_PLUGIN};
+use slurm_spank::{
+    spank_log_user, Context, Plugin, SpankHandle, SpankOption, SLURM_VERSION_NUMBER, SPANK_PLUGIN,
+};
 use std::convert::TryFrom;
 use std::error::Error;
 use tracing::info;
 
-SPANK_PLUGIN!(b"tests", 0x160502, SpankTest);
+SPANK_PLUGIN!(b"tests", SLURM_VERSION_NUMBER, SpankTest);
 
 #[derive(Default)]
 struct SpankTest {}
@@ -176,6 +178,10 @@ unsafe impl Plugin for SpankTest {
         };
         if test == "task-error" {
             return Err(eyre!("Expected an error").into());
+        }
+
+        if test == "prepend-argv" {
+            spank.prepend_task_argv(vec!["/usr/bin/echo", "Hello"])?;
         }
 
         Ok(())

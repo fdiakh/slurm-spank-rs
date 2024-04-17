@@ -240,6 +240,50 @@ impl<'a> SpankHandle<'a> {
         self.argv_to_vec(self.argc as usize, self.argv)
     }
 
+    /// Prepends the vector of str `argv` to the argument vector of the task
+    /// to be spawned. This function can be invoked from the following
+    /// functions: slurm_spank_task_init_privileged, and slurm_spank_task_init.
+    ///
+    /// An error is returned if called outside of a task context or if the
+    /// argument vector is invalid.
+    pub fn prepend_task_argv(&self, argv: Vec<&str>) -> Result<(), SpankError> {
+        let c_argv: Vec<CString> = argv
+            .iter()
+            .map(|&arg| CString::new(arg).map_err(|_| SpankError::from_str(arg)))
+            .collect::<Result<Vec<CString>, SpankError>>()?;
+
+        self.prepend_task_cstring(c_argv)
+    }
+
+    /// Prepends the vector of OsStr `argv` to the argument vector of the task
+    /// to be spawned. This function can be invoked from the following
+    /// functions: slurm_spank_task_init_privileged, and slurm_spank_task_init.
+    ///
+    /// An error is returned if called outside of a task context or if the
+    /// argument vector is invalid.
+    pub fn prepend_task_argv_os(&self, argv: Vec<&OsStr>) -> Result<(), SpankError> {
+        let c_argv: Vec<CString> = argv
+            .iter()
+            .map(|&arg| {
+                CString::new(arg.as_bytes())
+                    .map_err(|_| SpankError::CStringError(arg.to_string_lossy().to_string()))
+            })
+            .collect::<Result<Vec<CString>, SpankError>>()?;
+
+        self.prepend_task_cstring(c_argv)
+    }
+
+    fn prepend_task_cstring(&self, argv: Vec<CString>) -> Result<(), SpankError> {
+        let mut c_argv_ptrs: Vec<*const c_char> = argv.iter().map(|arg| arg.as_ptr()).collect();
+        let c_argv_ptr: *mut *const c_char = c_argv_ptrs.as_mut_ptr();
+        let count = i32::try_from(argv.len()).map_err(|_| SpankError::Overflow(argv.len()))?;
+
+        match unsafe { spank_sys::spank_prepend_task_argv(self.spank, count, c_argv_ptr) } {
+            spank_sys::ESPANK_SUCCESS => Ok(()),
+            e => Err(SpankError::from_spank("spank_prepend_task_argv", e)),
+        }
+    }
+
     fn argv_to_vec(
         &self,
         argc: usize,
@@ -1110,22 +1154,25 @@ pub fn make_cb_span(id: &str, cb: &str, ctx: &str, task_id: Option<u32>) -> trac
     }
 }
 
+pub use spank_sys::SLURM_VERSION_NUMBER;
+
 #[macro_export]
 /// Export a Plugin to make it available to the Slurm plugin loader
 ///
 /// # Example
 ///
 ///```rust,no_run
-///SPANK_PLUGIN!(b"renice", 0x130502, SpankRenice);
+///SPANK_PLUGIN!(b"renice", SLURM_VERSION_NUMBER, SpankRenice);
 ///```
 ///
 /// The first argument is the name of the SPANK plugin. It has to be provided as a byte string.
 ///
 /// The second argument is the Slurm version for which the plugin is built, specified in hexadecimal (2 digits per version component).
+/// The SLURM_VERSION_NUMBER constant can be used. It refers to the version of the Slurm headers that the plugin is built against.
 ///
 /// The last argument is a struct for which the Plugin trait has been implemented
 macro_rules! SPANK_PLUGIN {
-    ($spank_name:literal, $spank_version:literal, $spank_ty:ty) => {
+    ($spank_name:literal, $spank_version:expr, $spank_ty:ty) => {
         const fn byte_string_size<T>(_: &T) -> usize {
             std::mem::size_of::<T>()
         }
@@ -1489,6 +1536,7 @@ pub enum SpankError {
     PidNotFound(pid_t),
     SpankAPI(String, SpankApiError),
     Utf8Error(String),
+    Overflow(usize),
 }
 
 impl SpankError {
@@ -1542,6 +1590,7 @@ impl fmt::Display for SpankError {
             ),
             SpankError::PidNotFound(p) => write!(f, "Could not find pid {}", p),
             SpankError::IdNotFound(i) => write!(f, "Could not find id {}", i),
+            SpankError::Overflow(u) => write!(f, "Integer overflow: {}", u),
         }
     }
 }
