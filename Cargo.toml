@@ -1,3 +1,7 @@
+[workspace]
+resolver = "2"
+exclude = ["example", "test"]
+
 [package]
 name = "slurm-spank"
 version = "0.2.4"

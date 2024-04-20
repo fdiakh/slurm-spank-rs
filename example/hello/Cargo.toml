@@ -1,5 +1,5 @@
 [package]
-name = "hello"
+name = "slurm-spank-hello"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,5 +8,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 eyre = "0.6.8"
-slurm-spank = { path = "../.."}
+slurm-spank = { path = "../.." }
 tracing = "0.1.37"

@@ -11,3 +11,6 @@
 !example/hello/src/*
 !example/hello/Cargo.toml
 !example/hello/Cargo.lock
+!example/renice/src/*
+!example/renice/Cargo.toml
+!example/renice/Cargo.lock

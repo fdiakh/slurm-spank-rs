@@ -49,9 +49,16 @@ COPY example /build/slurm-spank/example
 COPY src /build/slurm-spank/src
 COPY test/src /build/slurm-spank/test_plugin/src
 
-# Build lib
+# Build test lib
 RUN cargo build
-RUN echo required /build/slurm-spank/target/debug/libslurm_spank_tests.so arg1 arg2>/etc/slurm/plugstack.conf
+
+# Build examples
+RUN cd /build/slurm-spank/example/hello && cargo build
+RUN cd /build/slurm-spank/example/renice && cargo build
+
+RUN echo required /build/slurm-spank/target/debug/libslurm_spank_tests.so arg1 arg2 >/etc/slurm/plugstack.conf
+RUN echo required /build/slurm-spank/example/hello/target/debug/libslurm_spank_hello.so >>/etc/slurm/plugstack.conf
+RUN echo required /build/slurm-spank/example/renice/target/debug/libslurm_spank_example.so >>/etc/slurm/plugstack.conf
 
 COPY docker/entrypoint.sh /entrypoint.sh
 ENTRYPOINT [ "/entrypoint.sh" ]

@@ -1,6 +1,6 @@
 use eyre::{eyre, Report, WrapErr};
 use libc::{setpriority, PRIO_PROCESS};
-use slurm_spank::{Context, Plugin, SpankHandle, SpankOption, SPANK_PLUGIN};
+use slurm_spank::{Context, Plugin, SpankHandle, SpankOption, SLURM_VERSION_NUMBER, SPANK_PLUGIN};
 use std::error::Error;
 use tracing::{error, info};
 

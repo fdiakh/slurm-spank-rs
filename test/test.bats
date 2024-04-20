@@ -130,3 +130,19 @@ teardown_file() {
 
     [ "$status" -eq 0 ]
 }
+
+@test 'hello example build ok' {
+    run docker run --privileged --cgroupns=private --rm -ti slurm-spank-rs/tests valgrind -q --log-file=/tmp/valgrind_client.log srun --help
+    assert_line --partial '--greet=name'
+
+    [ "$status" -eq 0 ]
+
+}
+
+@test 'renice example build ok' {
+    run docker run --privileged --cgroupns=private --rm -ti slurm-spank-rs/tests valgrind -q --log-file=/tmp/valgrind_client.log srun --help
+    assert_line --partial '--renice=prio'
+
+    [ "$status" -eq 0 ]
+
+}

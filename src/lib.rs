@@ -46,7 +46,7 @@
 //! The following Cargo.toml can be used to build this example plugin
 //!```toml
 //! [package]
-//! name = "hello"
+//! name = "slurm-spank-hello"
 //! version = "0.1.0"
 //! edition = "2021"
 //!
