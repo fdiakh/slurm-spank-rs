@@ -55,7 +55,7 @@
 //!
 //! [dependencies]
 //! eyre = "0.6.8"
-//! slurm-spank = "0.2"
+//! slurm-spank = "0.3"
 //! tracing = "0.1.37"
 //!```
 use lazy_static::lazy_static;
