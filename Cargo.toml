@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 description = "Safe Rust bindings to the Slurm SPANK API"
 repository = "https://github.com/fdiakh/slurm-spank-rs"
 readme = "README.md"
-keywords = [ "Slurm", "SPANK", "plugin", "HPC", "cluster" ]
+keywords = ["Slurm", "SPANK", "plugin", "HPC", "cluster"]
 
 [lib]
 name = "slurm_spank"
@@ -23,6 +23,3 @@ tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 
 [build-dependencies]
 bindgen = "0.65.1"
-
-[features]
-slurm_20_11 = []
