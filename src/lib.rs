@@ -71,8 +71,8 @@ use std::os::raw::{c_char, c_int};
 use std::os::unix::ffi::OsStrExt;
 use std::panic::catch_unwind;
 use std::panic::UnwindSafe;
+use std::ptr;
 use std::sync::Mutex;
-use std::{ptr, slice};
 use tracing::{error, span};
 use tracing_core::{Event, Subscriber};
 use tracing_subscriber::fmt::{
@@ -289,7 +289,7 @@ impl<'a> SpankHandle<'a> {
         argc: usize,
         argv: *const *const c_char,
     ) -> Result<Vec<&str>, SpankError> {
-        unsafe { slice::from_raw_parts(argv, argc) }
+        unsafe { slice_from_raw_parts_or_empty(argv, argc) }
             .iter()
             .map(|&arg| {
                 let cstr = unsafe { CStr::from_ptr(arg) };
@@ -299,7 +299,7 @@ impl<'a> SpankHandle<'a> {
     }
 
     fn argv_to_vec_os(&self, argc: usize, argv: *const *const c_char) -> Vec<&OsStr> {
-        unsafe { slice::from_raw_parts(argv, argc) }
+        unsafe { slice_from_raw_parts_or_empty(argv, argc) }
             .iter()
             .map(|&arg| OsStr::from_bytes(unsafe { CStr::from_ptr(arg) }.to_bytes()))
             .collect()
@@ -838,7 +838,7 @@ impl<'a> SpankHandle<'a> {
             )
         } {
             spank_sys::ESPANK_SUCCESS => {
-                Ok(unsafe { slice::from_raw_parts(gidv, gidc as usize) }.to_vec())
+                Ok(unsafe { slice_from_raw_parts_or_empty(gidv, gidc as usize) }.to_vec())
             }
             e => Err(SpankError::from_spank("spank_get_item", e)),
         }
@@ -1630,5 +1630,16 @@ impl SpankOption {
     pub fn takes_value(mut self, arg_name: &str) -> Self {
         self.arginfo = Some(arg_name.to_string());
         self
+    }
+}
+
+// Slurm may give us NULL pointers for zero length argv. We shouldn't pass them
+// to slice::from_raw_parts as NULL pointers can cause UB in Rust code even if
+// they are never dereferenced.
+unsafe fn slice_from_raw_parts_or_empty<'a, T>(data: *const T, len: usize) -> &'a [T] {
+    if data.is_null() && len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(data, len)
     }
 }
