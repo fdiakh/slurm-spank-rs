@@ -33,11 +33,8 @@ impl Default for SpankRenice {
 
 unsafe impl Plugin for SpankRenice {
     fn init(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
-        if spank.context()? == Context::Slurmd {
-            error!("Plugin init: {l}", l = spank.plugin_argv()?.len());
-        }
         // Don't do anything in slurmd/sbatch/salloc
-        if spank.context()? == Context::Allocator {
+        if spank.context()? == Context::Allocator || spank.context()? == Context::Slurmd {
             return Ok(());
         }
         if spank.context()? == Context::Remote {
