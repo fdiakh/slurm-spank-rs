@@ -179,7 +179,7 @@ pub struct OptionCache {
     pub values: HashMap<String, Option<OsString>>,
 }
 
-impl<'a> SpankHandle<'a> {
+impl SpankHandle<'_> {
     /// Returns the context in which the calling plugin is loaded.
     pub fn context(&self) -> Result<Context, SpankError> {
         let ctx = unsafe { spank_sys::spank_context() };
@@ -637,7 +637,7 @@ impl<'a> SpankHandle<'a> {
     pub fn is_option_set(&self, name: &str) -> bool {
         match self.context() {
             Ok(Context::JobScript) => self.getopt_os(name).is_ok(),
-            _ => self.opt_cache.values.get(name).is_some(),
+            _ => self.opt_cache.values.contains_key(name),
         }
     }
 
@@ -1431,7 +1431,7 @@ where
 
 struct SpankTraceWriter {}
 
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SpankTraceWriter {
+impl tracing_subscriber::fmt::MakeWriter<'_> for SpankTraceWriter {
     type Writer = Self;
 
     fn make_writer(&self) -> Self::Writer {
