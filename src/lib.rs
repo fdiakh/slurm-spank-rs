@@ -1204,7 +1204,7 @@ macro_rules! SPANK_PLUGIN {
 
                             if need_setup {
                                 plugin.setup(&mut spank).map_err(|e| {
-                                    plugin.report_error(e.as_ref());
+                                    plugin.report_error(&mut spank, e.as_ref());
                                     e
                                 })?;
                             }
@@ -1226,7 +1226,7 @@ macro_rules! SPANK_PLUGIN {
 
                             unsafe {
                                 plugin.$rust_spank_cb(&mut spank).map_err(|e| {
-                                    plugin.report_error(e.as_ref());
+                                    plugin.report_error(&mut spank, e.as_ref());
                                     e
                                 })
                             }
@@ -1351,7 +1351,7 @@ pub unsafe trait Plugin: Send {
     ///
     /// The default implementation logs errors through SPANK along with their
     /// causes.
-    fn report_error(&self, error: &dyn Error) {
+    fn report_error(&self, spank: &mut SpankHandle, error: &dyn Error) {
         // TODO: use error iterators once they're stable
         let mut report = error.to_string();
         let mut error = error;
