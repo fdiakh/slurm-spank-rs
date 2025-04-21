@@ -1365,7 +1365,7 @@ pub unsafe trait Plugin: Send {
     /// Called before the first callback from SPANK
     ///
     /// The default implementation configures a tracing Subscriber.
-    fn setup(&self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
+    fn setup(&mut self, spank: &mut SpankHandle) -> Result<(), Box<dyn Error>> {
         let default_level = match spank.context()? {
             Context::Local | Context::Allocator => "error",
             _ => "debug",
