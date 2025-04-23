@@ -17,6 +17,7 @@ fn main() {
     }
 
     let bindings = bindgen::Builder::default()
+        .rust_target("1.72.0".parse().unwrap())
         .header("wrapper.h")
         // We define spank_option manually to indicate that string pointers are const
         .blocklist_type("spank_option")
