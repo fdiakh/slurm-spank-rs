@@ -3,9 +3,8 @@ use std::path::PathBuf;
 
 fn main() {
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
-    if env::var("DOCS_RS").is_ok() {
+    if env::var("DOCS_RS").is_ok() || env::var("SKIP_SLURM_BINDINGS").is_ok() {
         // Use pre-generated bindings when building the documentation
-
         let source_bindings =
             PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("cargo manifest dir is empty"))
                 .join("build/bindings.rs");
