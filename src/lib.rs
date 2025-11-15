@@ -1134,7 +1134,7 @@ pub fn init_spank_handle(
     argc: c_int,
     argv: *const *const c_char,
     opt_cache: &mut OptionCache,
-) -> SpankHandle {
+) -> SpankHandle<'_> {
     SpankHandle {
         spank,
         argc,
