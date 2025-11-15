@@ -1,8 +1,9 @@
-FROM quay.io/fedora/fedora:40
+FROM quay.io/fedora/fedora:43
 
 # SLURM
-RUN dnf -y install git jq dnf-utils util-linux dbus-devel munge pmix-devel gcc valgrind procps-ng hwinfo
-RUN git clone --depth 1 --branch slurm-23-11-5-1 https://github.com/SchedMD/slurm.git
+RUN dnf -y install git jq dnf-utils util-linux dbus-devel munge pmix-devel gcc valgrind procps-ng hwinfo \
+    http-parser http-parser-devel
+RUN git clone --depth 1 --branch slurm-25-11-0-1 https://github.com/SchedMD/slurm.git
 RUN yum-builddep -y slurm/slurm.spec
 RUN cd slurm/ && ./configure --program-prefix= --prefix=/usr --exec-prefix=/usr \
     --bindir=/usr/bin --sbindir=/usr/sbin --sysconfdir=/etc/slurm \
@@ -28,6 +29,7 @@ RUN sed -i 's!linux0!localhost!' /etc/slurm/slurm.conf
 RUN sed -i 's!linux\[1-32\]!localhost!' /etc/slurm/slurm.conf
 RUN sed -i 's!.*SelectType=.*!SelectType=select/cons_tres!' /etc/slurm/slurm.conf
 RUN sed -i "s!.*SelectTypeParameters=.*!SelectTypeParameters=CR_Core_Memory!" /etc/slurm/slurm.conf
+RUN sed -i "s!.*AccountingStorageType=.*!AccountingStorageType=accounting_storage/none!" /etc/slurm/slurm.conf
 RUN echo IgnoreSystemd=yes >> /etc/slurm/cgroup.conf
 
 # Rust toolset
